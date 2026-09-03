@@ -328,6 +328,306 @@
         }
       }
     },
+    "/api/tasks/{task_id}/analyze": {
+      "post": {
+        "tags": [
+          "analyzer"
+        ],
+        "summary": "Analyze Task",
+        "operationId": "analyze_task_api_tasks__task_id__analyze_post",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PRIR"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tasks/{task_id}/plan": {
+      "post": {
+        "tags": [
+          "planner"
+        ],
+        "summary": "Plan Task",
+        "operationId": "plan_task_api_tasks__task_id__plan_post",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StrategyPlan"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tasks/{task_id}/execute": {
+      "post": {
+        "tags": [
+          "executor"
+        ],
+        "summary": "Execute Task",
+        "operationId": "execute_task_api_tasks__task_id__execute_post",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecutionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionStarted"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs/{run_id}/status": {
+      "get": {
+        "tags": [
+          "executor"
+        ],
+        "summary": "Get Run Status",
+        "operationId": "get_run_status_api_runs__run_id__status_get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs/{run_id}/result": {
+      "get": {
+        "tags": [
+          "executor"
+        ],
+        "summary": "Get Run Result",
+        "operationId": "get_run_result_api_runs__run_id__result_get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunResult"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/health": {
       "get": {
         "tags": [
@@ -406,6 +706,52 @@
         ],
         "title": "ErrorResponse"
       },
+      "ExecutionMode": {
+        "type": "string",
+        "enum": [
+          "mock",
+          "real"
+        ],
+        "title": "ExecutionMode"
+      },
+      "ExecutionRequest": {
+        "properties": {
+          "mode": {
+            "$ref": "#/components/schemas/ExecutionMode",
+            "default": "mock"
+          }
+        },
+        "type": "object",
+        "title": "ExecutionRequest"
+      },
+      "ExecutionStarted": {
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          },
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/TaskStatus"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Started At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "task_id",
+          "run_id",
+          "status",
+          "started_at"
+        ],
+        "title": "ExecutionStarted"
+      },
       "FileCreated": {
         "properties": {
           "file_id": {
@@ -464,6 +810,350 @@
         },
         "type": "object",
         "title": "HTTPValidationError"
+      },
+      "PRIR": {
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          },
+          "target_type": {
+            "$ref": "#/components/schemas/TargetType"
+          },
+          "algorithm": {
+            "type": "string",
+            "title": "Algorithm",
+            "default": "unknown"
+          },
+          "salt": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Salt"
+          },
+          "verification_cost": {
+            "$ref": "#/components/schemas/VerificationCost",
+            "default": "unknown"
+          },
+          "context_available": {
+            "type": "boolean",
+            "title": "Context Available"
+          },
+          "candidate_space": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Candidate Space"
+          },
+          "time_budget": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Time Budget"
+          },
+          "candidate_budget": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Candidate Budget"
+          },
+          "status": {
+            "$ref": "#/components/schemas/TaskStatus",
+            "default": "analyzed"
+          },
+          "confidence": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          }
+        },
+        "type": "object",
+        "required": [
+          "task_id",
+          "target_type",
+          "context_available",
+          "time_budget",
+          "candidate_budget",
+          "confidence"
+        ],
+        "title": "PRIR"
+      },
+      "PlannerType": {
+        "type": "string",
+        "enum": [
+          "mock",
+          "rule",
+          "llm",
+          "adaptive"
+        ],
+        "title": "PlannerType"
+      },
+      "RunResult": {
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          },
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/TaskStatus"
+          },
+          "total_time": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Total Time"
+          },
+          "total_tested": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Total Tested"
+          },
+          "total_recovered": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Total Recovered"
+          },
+          "strategy_results": {
+            "items": {
+              "$ref": "#/components/schemas/StrategyResult"
+            },
+            "type": "array",
+            "title": "Strategy Results"
+          },
+          "finished_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Finished At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "task_id",
+          "run_id",
+          "status",
+          "total_time",
+          "total_tested",
+          "total_recovered",
+          "strategy_results",
+          "finished_at"
+        ],
+        "title": "RunResult"
+      },
+      "RunStatus": {
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          },
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/TaskStatus"
+          },
+          "progress": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Progress"
+          },
+          "current_strategy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StrategyId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "elapsed_time": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Elapsed Time"
+          },
+          "tested": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Tested"
+          },
+          "recovered": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Recovered"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "task_id",
+          "run_id",
+          "status",
+          "progress",
+          "elapsed_time",
+          "tested",
+          "recovered",
+          "message"
+        ],
+        "title": "RunStatus"
+      },
+      "StrategyId": {
+        "type": "string",
+        "enum": [
+          "S1",
+          "S2",
+          "S3",
+          "S4",
+          "S5"
+        ],
+        "title": "StrategyId"
+      },
+      "StrategyItem": {
+        "properties": {
+          "strategy_id": {
+            "$ref": "#/components/schemas/StrategyId"
+          },
+          "strategy_name": {
+            "type": "string",
+            "title": "Strategy Name"
+          },
+          "priority": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Priority"
+          },
+          "time_budget": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Time Budget"
+          },
+          "candidate_budget": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Candidate Budget"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "parameters": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Parameters"
+          }
+        },
+        "type": "object",
+        "required": [
+          "strategy_id",
+          "strategy_name",
+          "priority",
+          "time_budget",
+          "candidate_budget",
+          "reason"
+        ],
+        "title": "StrategyItem"
+      },
+      "StrategyPlan": {
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          },
+          "planner_type": {
+            "$ref": "#/components/schemas/PlannerType",
+            "default": "mock"
+          },
+          "total_time_budget": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Total Time Budget"
+          },
+          "strategies": {
+            "items": {
+              "$ref": "#/components/schemas/StrategyItem"
+            },
+            "type": "array",
+            "title": "Strategies"
+          },
+          "status": {
+            "$ref": "#/components/schemas/TaskStatus",
+            "default": "planned"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          }
+        },
+        "type": "object",
+        "required": [
+          "task_id",
+          "total_time_budget",
+          "strategies"
+        ],
+        "title": "StrategyPlan"
+      },
+      "StrategyResult": {
+        "properties": {
+          "strategy_id": {
+            "$ref": "#/components/schemas/StrategyId"
+          },
+          "time": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Time"
+          },
+          "tested": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Tested"
+          },
+          "recovered": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Recovered"
+          },
+          "success_rate": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Success Rate"
+          }
+        },
+        "type": "object",
+        "required": [
+          "strategy_id",
+          "time",
+          "tested",
+          "recovered",
+          "success_rate"
+        ],
+        "title": "StrategyResult"
       },
       "TargetInput": {
         "properties": {
@@ -791,6 +1481,16 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "VerificationCost": {
+        "type": "string",
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "unknown"
+        ],
+        "title": "VerificationCost"
       }
     }
   }

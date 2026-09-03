@@ -7,6 +7,7 @@ def test_analyze_plan_execute_mock_hash_task(client, hash_task_payload):
     assert prir["task_id"] == task_id
     assert prir["target_type"] == "hash"
     assert prir["algorithm"] == "bcrypt"
+    assert prir["salt"] is True
     assert prir["verification_cost"] == "high"
     assert prir["status"] == "analyzed"
 
@@ -78,3 +79,19 @@ def test_execute_requires_planned_task(client, hash_task_payload):
         "message": "任务状态不允许启动执行",
         "details": {"from": "created", "to": "running"},
     }
+
+
+def test_context_plan_respects_minimum_task_budget(client, hash_task_payload):
+    payload = hash_task_payload | {"time_budget": 1, "candidate_budget": 1}
+    task_id = client.post("/api/tasks", json=payload).json()["task_id"]
+
+    analyzed = client.post(f"/api/tasks/{task_id}/analyze")
+    assert analyzed.status_code == 200
+
+    planned = client.post(f"/api/tasks/{task_id}/plan")
+    assert planned.status_code == 200
+    body = planned.json()
+    assert [item["strategy_id"] for item in body["strategies"]] == ["S1"]
+    assert sum(item["time_budget"] for item in body["strategies"]) <= 1
+    assert sum(item["candidate_budget"] for item in body["strategies"]) <= 1
+    assert body["warnings"] == ["上下文策略因任务预算不足未加入计划"]

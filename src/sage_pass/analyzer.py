@@ -96,7 +96,13 @@ def _analyze_target(
 ) -> tuple[str, bool | None, VerificationCost, float, list[str]]:
     warnings: list[str] = []
     if task.known_algorithm:
-        return task.known_algorithm, None, _cost_for_algorithm(task.known_algorithm), 0.9, warnings
+        return (
+            task.known_algorithm,
+            _salt_for_algorithm(task.known_algorithm),
+            _cost_for_algorithm(task.known_algorithm),
+            0.9,
+            warnings,
+        )
 
     if task.target.type == TargetType.HASH:
         if not task.target.content:

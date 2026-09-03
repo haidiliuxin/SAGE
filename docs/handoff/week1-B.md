@@ -33,7 +33,7 @@ POST /api/tasks/{task_id}/analyze
 1. Analyzer 支持 Hash 文本任务和文件元数据任务。
 2. Hash 任务优先使用 `known_algorithm`；未提供时按常见 Hash 形态识别 `bcrypt`、`argon2`、`md5`、`sha1`、`sha256`、`sha512`。
 3. 文件任务第一周只生成元数据级 PRIR，不解析 ZIP/PDF/Office 加密结构；不确定字段返回 `unknown` 或 `null`。
-4. Planner 当前为 `mock`，固定生成 `S1 Baseline`；如果 PRIR 表明有上下文，则追加 `S4 Context`。
+4. Planner 当前为 `mock`，固定生成 `S1 Baseline`；如果 PRIR 表明有上下文且任务预算足够，则追加 `S4 Context`。极小预算下保留 S1，并通过 `warnings` 说明未加入 S4。
 5. Executor 当前只支持 `{"mode": "mock"}`，会生成 `run_id`，按策略写入一条或多条 `StrategyRunModel`。
 6. 任务状态按 `created -> analyzed -> planned -> running -> completed` 推进，非法状态调用返回统一错误包络。
 
@@ -50,7 +50,7 @@ POST /api/tasks/{task_id}/analyze
 
 乙方本地验证结果：
 
-- `pytest`：11 项通过；
+- `pytest`：12 项通过；
 - 已通过 Swagger UI 完整跑通创建任务、分析、规划、执行、状态查询和结果查询链路。
 
 ## 当前限制与下一步

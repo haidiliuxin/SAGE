@@ -209,7 +209,7 @@ Pydantic 模型位于 `src/sage_pass/schemas.py`，Python Protocol 位于 `src/s
 }
 ```
 
-当前 Mock Planner 固定生成 `S1`；如果 PRIR 表明有上下文，则追加 `S4`。策略时间预算之和由 `StrategyPlan` 校验，不允许超过任务总时间预算。
+当前 Mock Planner 固定生成 `S1`；如果 PRIR 表明有上下文且时间、候选预算均足以为两个策略至少分配 1 个单位，则追加 `S4`，否则只返回 `S1` 并在 `warnings` 中说明。策略时间预算之和由 `StrategyPlan` 校验，不允许超过任务总时间预算。
 
 ### 启动模拟执行
 
