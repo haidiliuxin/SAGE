@@ -133,25 +133,164 @@ running  -> completed | failed | cancelled
 
 重复写入当前状态按幂等成功处理；终态不允许回退。
 
-## 已定义、待乙实现的模块契约
+## 乙已实现的 Mock 链路 API
 
-Pydantic 模型位于 `src/sage_pass/schemas.py`，Python Protocol 位于 `src/sage_pass/contracts.py`。
+Pydantic 模型位于 `src/sage_pass/schemas.py`，Python Protocol 位于 `src/sage_pass/contracts.py`。当前版本按第一周统一接口提供 Mock 实现，不执行真实口令恢复。
 
-- `Analyzer.analyze(TaskDetail) -> PRIR`
-- `Planner.plan(PRIR) -> StrategyPlan`
-- `Executor.start(TaskDetail, StrategyPlan) -> ExecutionStarted`
-- `Executor.status(run_id) -> RunStatus`
-- `Executor.result(run_id) -> RunResult`
+### 分析任务并生成 PRIR
 
-预留 HTTP 路径与团队接口保持一致：
+`POST /api/tasks/{task_id}/analyze`
 
-- `POST /api/tasks/{task_id}/analyze`
-- `POST /api/tasks/{task_id}/plan`
-- `POST /api/tasks/{task_id}/execute`
-- `GET /api/runs/{run_id}/status`
-- `GET /api/runs/{run_id}/result`
+要求任务当前状态为 `created`。成功后写入 `PRIRModel`，任务状态更新为 `analyzed`。重复分析已处于 `analyzed` 且已有 PRIR 的任务时，返回已有 PRIR。
 
-这些路径当前不会注册，避免返回伪造业务数据。乙接入实现后再挂载路由。
+返回：
+
+```json
+{
+  "task_id": "T39FD9B11EB89",
+  "target_type": "hash",
+  "algorithm": "bcrypt",
+  "salt": true,
+  "verification_cost": "high",
+  "context_available": true,
+  "candidate_space": null,
+  "time_budget": 300,
+  "candidate_budget": 100000,
+  "status": "analyzed",
+  "confidence": 0.9,
+  "warnings": []
+}
+```
+
+说明：
+
+- Hash 文本任务会优先使用 `known_algorithm`；未提供时按常见 Hash 形态做规则识别；
+- 文件任务支持 `zip`、`pdf`、`office` 的元数据级 PRIR，第一周不解析真实加密结构；
+- 无法确认的字段使用 `unknown` 或 `null`。
+
+### 生成策略计划
+
+`POST /api/tasks/{task_id}/plan`
+
+要求任务当前状态为 `analyzed` 或 `planned`，且已有 PRIR。成功后返回 `StrategyPlan`；若任务从 `analyzed` 进入规划，状态更新为 `planned`。
+
+返回：
+
+```json
+{
+  "task_id": "T39FD9B11EB89",
+  "planner_type": "mock",
+  "total_time_budget": 300,
+  "strategies": [
+    {
+      "strategy_id": "S1",
+      "strategy_name": "Baseline",
+      "priority": 1,
+      "time_budget": 60,
+      "candidate_budget": 20000,
+      "reason": "优先测试高频口令",
+      "parameters": {}
+    },
+    {
+      "strategy_id": "S4",
+      "strategy_name": "Context",
+      "priority": 2,
+      "time_budget": 120,
+      "candidate_budget": 40000,
+      "reason": "任务提供了上下文信息",
+      "parameters": {
+        "use_years": true,
+        "use_keywords": true
+      }
+    }
+  ],
+  "status": "planned",
+  "warnings": []
+}
+```
+
+当前 Mock Planner 固定生成 `S1`；如果 PRIR 表明有上下文，则追加 `S4`。策略时间预算之和由 `StrategyPlan` 校验，不允许超过任务总时间预算。
+
+### 启动模拟执行
+
+`POST /api/tasks/{task_id}/execute`
+
+请求：
+
+```json
+{"mode": "mock"}
+```
+
+要求任务当前状态为 `planned`，且已有 PRIR。第一周只接受 `mock` 模式。成功后写入一条或多条 `StrategyRunModel`，任务状态更新为 `running`。
+
+返回：
+
+```json
+{
+  "task_id": "T39FD9B11EB89",
+  "run_id": "R10D44A4973C",
+  "status": "running",
+  "started_at": "2026-09-01T22:05:00+08:00"
+}
+```
+
+### 查询执行状态
+
+`GET /api/runs/{run_id}/status`
+
+返回：
+
+```json
+{
+  "task_id": "T39FD9B11EB89",
+  "run_id": "R10D44A4973C",
+  "status": "running",
+  "progress": 0.6,
+  "current_strategy": "S4",
+  "elapsed_time": 1.2,
+  "tested": 36000,
+  "recovered": 0,
+  "message": "正在执行上下文策略"
+}
+```
+
+Mock 执行会随时间推进进度；完成后返回 `completed`，并把任务状态从 `running` 推进到 `completed`。
+
+### 查询最终结果
+
+`GET /api/runs/{run_id}/result`
+
+返回：
+
+```json
+{
+  "task_id": "T39FD9B11EB89",
+  "run_id": "R10D44A4973C",
+  "status": "completed",
+  "total_time": 2.0,
+  "total_tested": 60000,
+  "total_recovered": 3,
+  "strategy_results": [
+    {
+      "strategy_id": "S1",
+      "time": 0.67,
+      "tested": 20000,
+      "recovered": 1,
+      "success_rate": 0.00005
+    },
+    {
+      "strategy_id": "S4",
+      "time": 1.33,
+      "tested": 40000,
+      "recovered": 2,
+      "success_rate": 0.00005
+    }
+  ],
+  "finished_at": "2026-09-01T22:05:02+08:00"
+}
+```
+
+调用结果接口会补全 Mock 执行结果；如果任务仍为 `running`，会推进到 `completed`。
 
 ## 统一错误响应
 
@@ -167,4 +306,4 @@ Pydantic 模型位于 `src/sage_pass/schemas.py`，Python Protocol 位于 `src/s
 }
 ```
 
-当前使用的代码：`INVALID_TASK`、`TASK_NOT_FOUND`、`INTERNAL_ERROR`。已在公共契约中为后续模块保留 `ANALYZE_FAILED`、`PLAN_FAILED`、`EXECUTION_FAILED` 和 `BUDGET_EXCEEDED` 的格式约定。
+当前使用的代码：`INVALID_TASK`、`TASK_NOT_FOUND`、`ANALYZE_FAILED`、`PLAN_FAILED`、`EXECUTION_FAILED`、`INTERNAL_ERROR`。已在公共契约中为后续模块保留 `BUDGET_EXCEEDED` 的格式约定。

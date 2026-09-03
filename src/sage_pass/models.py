@@ -64,7 +64,7 @@ class StrategyRunModel(Base):
     __tablename__ = "strategy_runs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    run_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    run_id: Mapped[str] = mapped_column(String(32), index=True)
     task_id: Mapped[str] = mapped_column(
         String(32), ForeignKey("tasks.task_id"), index=True
     )

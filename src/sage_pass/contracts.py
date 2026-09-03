@@ -13,7 +13,7 @@ from .schemas import (
 
 
 class Analyzer(Protocol):
-    """乙负责实现：原始任务 -> PRIR。"""
+    """乙负责实现：原始任务 -> PRIR。""" 
 
     def analyze(self, task: TaskDetail) -> PRIR: ...
 
