@@ -81,6 +81,23 @@ def test_execute_requires_planned_task(client, hash_task_payload):
     }
 
 
+def test_running_task_can_be_cancelled_before_completion(client, hash_task_payload):
+    task_id = client.post("/api/tasks", json=hash_task_payload).json()["task_id"]
+    client.post(f"/api/tasks/{task_id}/analyze")
+    client.post(f"/api/tasks/{task_id}/plan")
+    started = client.post(f"/api/tasks/{task_id}/execute", json={"mode": "mock"})
+    assert started.status_code == 200
+    assert started.json()["status"] == "running"
+
+    cancelled = client.patch(
+        f"/api/tasks/{task_id}/status", json={"status": "cancelled"}
+    )
+
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+    assert client.get(f"/api/tasks/{task_id}").json()["status"] == "cancelled"
+
+
 def test_context_plan_respects_minimum_task_budget(client, hash_task_payload):
     payload = hash_task_payload | {"time_budget": 1, "candidate_budget": 1}
     task_id = client.post("/api/tasks", json=payload).json()["task_id"]

@@ -19,7 +19,10 @@ from .schemas import (
 from .service import now_iso, public_id
 
 
-MOCK_DURATION_SECONDS = 2.0
+# Mock 执行按计划候选量推进，不再让所有任务使用同一个固定时长。
+# 最小交互窗口确保很小的任务启动后仍有机会取消。
+MOCK_CANDIDATES_PER_SECOND = 5_000.0
+MOCK_MIN_INTERACTION_SECONDS = 5.0
 
 
 class MockExecutor:
@@ -81,7 +84,7 @@ class MockExecutor:
     def result(self, run_id: str) -> RunResult:
         items = _require_run(self.session, run_id)
         _complete_run(self.session, items)
-        total_time = max(_elapsed_seconds(items[0].started_at), MOCK_DURATION_SECONDS)
+        total_time = max(_elapsed_seconds(items[0].started_at), _run_duration(items))
         return RunResult(
             task_id=items[0].task_id,
             run_id=run_id,
@@ -143,7 +146,15 @@ def _complete_run(session: Session, items: list[StrategyRunModel]) -> None:
 def _run_progress(items: list[StrategyRunModel]) -> float:
     if TaskStatus(items[0].status) == TaskStatus.COMPLETED:
         return 1.0
-    return min(1.0, _elapsed_seconds(items[0].started_at) / MOCK_DURATION_SECONDS)
+    return min(1.0, _elapsed_seconds(items[0].started_at) / _run_duration(items))
+
+
+def _run_duration(items: list[StrategyRunModel]) -> float:
+    candidate_count = sum(item.candidate_budget for item in items)
+    return max(
+        MOCK_MIN_INTERACTION_SECONDS,
+        candidate_count / MOCK_CANDIDATES_PER_SECOND,
+    )
 
 
 def _elapsed_seconds(started_at: str | None) -> float:
