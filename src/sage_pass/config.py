@@ -20,7 +20,10 @@ class Settings:
     def from_env(cls) -> "Settings":
         origins = os.getenv(
             "SAGE_CORS_ORIGINS",
-            "http://localhost:8501,http://127.0.0.1:8501",
+            (
+                "http://localhost:5173,http://127.0.0.1:5173,"
+                "http://localhost:8501,http://127.0.0.1:8501"
+            ),
         )
         return cls(
             database_url=os.getenv(

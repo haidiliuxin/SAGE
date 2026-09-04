@@ -1,0 +1,25 @@
+{
+  "name": "sage-pass-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --host 0.0.0.0"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "5.0.4",
+    "vite": "7.1.7",
+    "typescript": "5.9.3",
+    "react": "19.1.1",
+    "react-dom": "19.1.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "react-test-renderer": "19.1.1",
+    "@types/react": "19.1.16",
+    "@types/react-dom": "19.1.9"
+  }
+}
