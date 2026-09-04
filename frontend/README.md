@@ -5,7 +5,7 @@
 ## 启动
 
 ```powershell
-npm install
+npm ci
 npm run dev
 ```
 
@@ -35,3 +35,19 @@ VITE_API_BASE_URL=
 - `POST /api/files`（依据现有 README 补充的适配入口）
 
 本界面仅用于经过授权的离线口令安全评测。
+
+## 回归验证
+
+```powershell
+npm ci
+npm test
+npm run build
+```
+
+`npm test` 使用 Node 测试运行器执行 6 项前端回归测试，覆盖原始文本输入、提交解析、非法年份、实际结果摘要和断网错误处理。测试依赖仅用于开发，不参与生产运行。
+
+- 关键词和年份支持中文/英文逗号；输入过程中保留原文，提交时去除首尾空白和空条目。
+- 年份必须为正整数，非法值会显示错误，不发送创建任务请求。
+- 结果页只展示后端返回的统计值，不推断未经计算的策略优劣。
+
+合并交接说明见 `../docs/handoff/week1-frontend.md`。

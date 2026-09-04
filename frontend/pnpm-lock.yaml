@@ -30,6 +30,12 @@ importers:
       '@types/react-dom':
         specifier: 19.1.9
         version: 19.1.9(@types/react@19.1.16)
+      esbuild:
+        specifier: 0.25.12
+        version: 0.25.12
+      react-test-renderer:
+        specifier: 19.1.1
+        version: 19.1.1(react@19.1.1)
 
 packages:
 
@@ -645,9 +651,17 @@ packages:
     peerDependencies:
       react: ^19.1.1
 
+  react-is@19.2.8:
+    resolution: {integrity: sha512-s5un28nYxKJw5gvUHyW5PCC28CvBqLu9r3cWgzHT4Vo/5fqqkFcdRYsGcKf50WMPpjjFZS5d76fn3YCo2njKwQ==}
+
   react-refresh@0.17.0:
     resolution: {integrity: sha512-z6F7K9bV85EfseRCp2bzrpyQ0Gkw1uLoCel9XBVWPg/TjRj94SkJzUTGfOa4bs7iJvBWtQG0Wq7wnI0syw3EBQ==}
     engines: {node: '>=0.10.0'}
+
+  react-test-renderer@19.1.1:
+    resolution: {integrity: sha512-aGRXI+zcBTtg0diHofc7+Vy97nomBs9WHHFY1Csl3iV0x6xucjNYZZAkiVKGiNYUv23ecOex5jE67t8ZzqYObA==}
+    peerDependencies:
+      react: ^19.1.1
 
   react@19.1.1:
     resolution: {integrity: sha512-w8nqGImo45dmMIfljjMwOGtbmC/mk4CMYhWIicdSflH91J9TyCyczcPFXJzrZ/ZXcgGRFeP6BU0BEJTw6tZdfQ==}
@@ -1207,7 +1221,15 @@ snapshots:
       react: 19.1.1
       scheduler: 0.26.0
 
+  react-is@19.2.8: {}
+
   react-refresh@0.17.0: {}
+
+  react-test-renderer@19.1.1(react@19.1.1):
+    dependencies:
+      react: 19.1.1
+      react-is: 19.2.8
+      scheduler: 0.26.0
 
   react@19.1.1: {}
 

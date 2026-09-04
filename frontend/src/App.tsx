@@ -1,5 +1,6 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError } from './api/client'
+import { parseContextLists } from './context-input'
 import type { FileDetail, FlowSnapshot, RunStatus, TargetType, TaskDetail, TaskInput, TaskStatus } from './types'
 
 type View = 'overview' | 'new' | 'workspace' | 'tasks'
@@ -101,6 +102,8 @@ function App() {
   const [view, setView] = useState<View>('overview')
   const [mobileNav, setMobileNav] = useState(false)
   const [form, setForm] = useState<TaskInput>(blankInput)
+  const [keywordText, setKeywordText] = useState(blankInput.context.keywords.join('，'))
+  const [yearText, setYearText] = useState(blankInput.context.years.join('，'))
   const [file, setFile] = useState<File | null>(null)
   const [stage, setStage] = useState<FlowStage>('idle')
   const [snapshot, setSnapshot] = useState<FlowSnapshot>(initialSnapshot)
@@ -219,6 +222,7 @@ function App() {
 
     try {
       let prepared = structuredClone(form)
+      prepared.context = { ...prepared.context, ...parseContextLists(keywordText, yearText) }
       if (prepared.target.type !== 'hash') {
         if (!file) throw new Error('请选择一个经过授权的离线评测文件。')
         setStage('uploading')
@@ -402,8 +406,8 @@ function App() {
               <div className="form-section">
                 <div className="form-section-title"><span>03</span><div><h2>上下文信息</h2><p>为 Context 策略提供可解释线索</p></div></div>
                 <div className="form-grid two">
-                  <label><span>关键词 <em>用逗号分隔</em></span><input value={form.context.keywords.join('，')} onChange={(e) => updateContext('keywords', e.target.value.split(/[,，]/).map((v) => v.trim()).filter(Boolean))} /></label>
-                  <label><span>相关年份 <em>用逗号分隔</em></span><input value={form.context.years.join('，')} onChange={(e) => updateContext('years', e.target.value.split(/[,，]/).map(Number).filter(Boolean))} /></label>
+                  <label><span>关键词 <em>用逗号分隔</em></span><input value={keywordText} onChange={(e) => setKeywordText(e.target.value)} /></label>
+                  <label><span>相关年份 <em>用逗号分隔</em></span><input value={yearText} onChange={(e) => setYearText(e.target.value)} /></label>
                   <label><span>地区</span><input value={form.context.region} onChange={(e) => updateContext('region', e.target.value)} /></label>
                   <label><span>组织</span><input value={form.context.organization} onChange={(e) => updateContext('organization', e.target.value)} /></label>
                 </div>
@@ -482,7 +486,7 @@ function App() {
                   </article>
                 </div>
 
-                {snapshot.result && <article className="result-strip"><div><span className="result-check"><Icon name="check" /></span><div><span className="section-kicker">ASSESSMENT COMPLETE</span><h2>模拟评测链路已完整跑通</h2><p>共测试 {formatNumber(snapshot.result.total_tested)} 个候选，恢复 {snapshot.result.total_recovered} 项；Context 策略在本轮获得最高单位收益。</p></div></div><button className="button secondary" onClick={resetFlow}>新建评测 <Icon name="arrow" size={15} /></button></article>}
+                {snapshot.result && <article className="result-strip"><div><span className="result-check"><Icon name="check" /></span><div><span className="section-kicker">ASSESSMENT COMPLETE</span><h2>模拟评测链路已完整跑通</h2><p>共测试 {formatNumber(snapshot.result.total_tested)} 个候选，恢复 {snapshot.result.total_recovered} 项。各策略统计见上方列表。</p></div></div><button className="button secondary" onClick={resetFlow}>新建评测 <Icon name="arrow" size={15} /></button></article>}
               </>
             )}
           </section>
