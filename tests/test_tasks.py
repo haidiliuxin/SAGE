@@ -44,6 +44,21 @@ def test_status_transition_is_checked(client, hash_task_payload):
     }
 
 
+def test_task_can_be_cancelled_and_cannot_resume(client, hash_task_payload):
+    task_id = client.post("/api/tasks", json=hash_task_payload).json()["task_id"]
+
+    cancelled = client.patch(
+        f"/api/tasks/{task_id}/status", json={"status": "cancelled"}
+    )
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+
+    resumed = client.patch(
+        f"/api/tasks/{task_id}/status", json={"status": "analyzed"}
+    )
+    assert resumed.status_code == 409
+
+
 def test_validation_and_not_found_use_unified_error_shape(client, hash_task_payload):
     invalid_payload = hash_task_payload | {
         "target": {"type": "hash", "content": None, "file_id": None}
