@@ -232,12 +232,12 @@ function App() {
       setSnapshot((current) => ({ ...current, input: prepared, task }))
 
       setStage('analyzing')
-      const prir = await api.analyze(task.task_id, prepared)
+      const prir = await api.analyze(task.task_id)
       if (token !== runToken.current) return
       setSnapshot((current) => ({ ...current, prir }))
 
       setStage('planning')
-      const plan = await api.plan(task.task_id, prepared)
+      const plan = await api.plan(task.task_id)
       if (token !== runToken.current) return
       setSnapshot((current) => ({ ...current, plan }))
 
@@ -320,7 +320,7 @@ function App() {
           <button className="mobile-menu" onClick={() => setMobileNav(true)} aria-label="打开导航"><Icon name="menu" /></button>
           <div className="breadcrumbs"><span>SAGE-Pass</span><b>/</b>{nav.find((item) => item.key === view)?.label}</div>
           <div className="top-actions">
-            <span className="mode-pill"><i /> {api.isFallbackEnabled ? '智能联调模式' : '真实接口模式'}</span>
+            <span className="mode-pill"><i /> 真实接口模式</span>
             <button className="avatar" title="本地用户">SP</button>
           </div>
         </header>

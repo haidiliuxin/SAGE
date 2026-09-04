@@ -16,12 +16,12 @@ npm run dev
 复制 `.env.example` 为 `.env.local`：
 
 ```env
-VITE_API_BASE_URL=http://127.0.0.1:8000
-VITE_ENABLE_MOCK_FALLBACK=true
+VITE_API_BASE_URL=
 ```
 
-- 后端在线时，页面使用真实接口。
-- 后端离线且 Mock fallback 开启时，页面在浏览器中模拟完整链路。
+- 留空时由 Vite 将 `/health` 和 `/api` 代理到 `http://127.0.0.1:8000`。
+- 也可设置为 `http://127.0.0.1:8000` 让浏览器直连；后端默认允许 5173 端口跨域访问。
+- 前端始终使用真实后端数据。后端不可用时直接显示接口错误，不会生成本地模拟任务或结果。
 - 文件上传暂按 `POST /api/files`、字段名 `file` 对接；如后端接口不同，只需修改 `src/api/client.ts` 中的 `uploadFile`。
 
 ## 已覆盖接口

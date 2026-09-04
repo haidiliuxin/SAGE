@@ -11,10 +11,7 @@ import type {
   TaskInput,
   TaskStatus,
 } from '../types'
-import { mockApi } from './mock'
-
 const baseUrl = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
-const mockFallback = import.meta.env.VITE_ENABLE_MOCK_FALLBACK !== 'false'
 
 export class ApiError extends Error {
   code: string
@@ -45,18 +42,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T
 }
 
-async function withFallback<T>(remote: () => Promise<T>, local: () => Promise<T>): Promise<T> {
-  try {
-    return await remote()
-  } catch (error) {
-    if (!mockFallback || (error instanceof ApiError && error.code !== 'NETWORK_ERROR')) throw error
-    return local()
-  }
-}
-
 export const api = {
-  isFallbackEnabled: mockFallback,
-
   health() {
     return request<{ status: string }>('/health')
   },
@@ -64,17 +50,11 @@ export const api = {
   uploadFile(file: File) {
     const data = new FormData()
     data.append('file', file)
-    return withFallback(
-      () => request<{ file_id: string }>('/api/files', { method: 'POST', body: data }),
-      () => mockApi.uploadFile(file),
-    )
+    return request<{ file_id: string }>('/api/files', { method: 'POST', body: data })
   },
 
   createTask(input: TaskInput) {
-    return withFallback(
-      () => request<TaskCreated>('/api/tasks', { method: 'POST', body: JSON.stringify(input) }),
-      () => mockApi.createTask(input),
-    )
+    return request<TaskCreated>('/api/tasks', { method: 'POST', body: JSON.stringify(input) })
   },
 
   listTasks() {
@@ -96,42 +76,26 @@ export const api = {
     return request<FileDetail>(`/api/files/${fileId}`)
   },
 
-  analyze(taskId: string, input: TaskInput) {
-    return withFallback(
-      () => request<PRIR>(`/api/tasks/${taskId}/analyze`, { method: 'POST' }),
-      () => mockApi.analyze(taskId, input),
-    )
+  analyze(taskId: string) {
+    return request<PRIR>(`/api/tasks/${taskId}/analyze`, { method: 'POST' })
   },
 
-  plan(taskId: string, input: TaskInput) {
-    return withFallback(
-      () => request<StrategyPlan>(`/api/tasks/${taskId}/plan`, { method: 'POST' }),
-      () => mockApi.plan(taskId, input),
-    )
+  plan(taskId: string) {
+    return request<StrategyPlan>(`/api/tasks/${taskId}/plan`, { method: 'POST' })
   },
 
   execute(taskId: string) {
-    return withFallback(
-      () =>
-        request<RunCreated>(`/api/tasks/${taskId}/execute`, {
-          method: 'POST',
-          body: JSON.stringify({ mode: 'mock' }),
-        }),
-      () => mockApi.execute(taskId),
-    )
+    return request<RunCreated>(`/api/tasks/${taskId}/execute`, {
+      method: 'POST',
+      body: JSON.stringify({ mode: 'mock' }),
+    })
   },
 
   getStatus(runId: string) {
-    return withFallback(
-      () => request<RunStatus>(`/api/runs/${runId}/status`),
-      () => mockApi.getStatus(runId),
-    )
+    return request<RunStatus>(`/api/runs/${runId}/status`)
   },
 
   getResult(runId: string) {
-    return withFallback(
-      () => request<RunResult>(`/api/runs/${runId}/result`),
-      () => mockApi.getResult(runId),
-    )
+    return request<RunResult>(`/api/runs/${runId}/result`)
   },
 }

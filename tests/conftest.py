@@ -13,7 +13,7 @@ def client(tmp_path: Path):
         database_url=f"sqlite:///{(tmp_path / 'test.db').as_posix()}",
         upload_dir=tmp_path / "uploads",
         max_upload_bytes=1024,
-        cors_origins=("http://localhost:8501",),
+        cors_origins=("http://localhost:5173",),
     )
     with TestClient(create_app(settings)) as test_client:
         yield test_client
