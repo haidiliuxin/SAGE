@@ -238,30 +238,56 @@ function App() {
       setStage('analyzing')
       const prir = await api.analyze(task.task_id)
       if (token !== runToken.current) return
-      setSnapshot((current) => ({ ...current, prir }))
+      setSnapshot((current) => ({
+        ...current,
+        prir,
+        task: current.task ? { ...current.task, status: prir.status } : null,
+      }))
 
       setStage('planning')
       const plan = await api.plan(task.task_id)
       if (token !== runToken.current) return
-      setSnapshot((current) => ({ ...current, plan }))
+      setSnapshot((current) => ({
+        ...current,
+        plan,
+        task: current.task ? { ...current.task, status: plan.status } : null,
+      }))
 
       setStage('executing')
       const run = await api.execute(task.task_id)
       if (token !== runToken.current) return
-      setSnapshot((current) => ({ ...current, run }))
+      setSnapshot((current) => ({
+        ...current,
+        run,
+        task: current.task ? { ...current.task, status: run.status } : null,
+      }))
 
       let current: RunStatus
       do {
         await new Promise((resolve) => window.setTimeout(resolve, 1000))
         current = await api.getStatus(run.run_id)
         if (token !== runToken.current) return
-        setSnapshot((previous) => ({ ...previous, status: current }))
+        setSnapshot((previous) => ({
+          ...previous,
+          status: current,
+          task: previous.task ? { ...previous.task, status: current.status } : null,
+        }))
       } while (current.status === 'running')
 
       if (current.status === 'failed') throw new Error(current.message || '执行失败')
+      if (current.status === 'cancelled') {
+        setStage('cancelled')
+        return
+      }
       const result = await api.getResult(run.run_id)
       if (token !== runToken.current) return
-      setSnapshot((currentSnapshot) => ({ ...currentSnapshot, result }))
+      setSnapshot((currentSnapshot) => ({
+        ...currentSnapshot,
+        result,
+        task: currentSnapshot.task
+          ? { ...currentSnapshot.task, status: result.status }
+          : null,
+      }))
       setStage('completed')
     } catch (caught) {
       const message = caught instanceof ApiError
@@ -427,7 +453,7 @@ function App() {
             <div className="page-title workspace-title">
               <div><span className="section-kicker">COMMAND CENTER</span><h1>执行工作台</h1></div>
               <div className="workspace-actions">
-                {snapshot.task && !['completed', 'cancelled', 'error'].includes(stage) && (
+                {snapshot.task && !['completed', 'failed', 'cancelled'].includes(snapshot.task.status) && (
                   <button
                     className="button cancel-button"
                     onClick={() => void cancelTask({ task_id: snapshot.task!.task_id, name: snapshot.input.name })}

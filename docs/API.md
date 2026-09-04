@@ -254,7 +254,7 @@ Pydantic 模型位于 `src/sage_pass/schemas.py`，Python Protocol 位于 `src/s
 }
 ```
 
-Mock 执行会随时间推进进度；完成后返回 `completed`，并把任务状态从 `running` 推进到 `completed`。
+Mock 执行根据策略计划中的候选总量和模拟吞吐率动态推进；任务处于 `running` 时可以取消。完成后返回 `completed`，并把任务状态从 `running` 推进到 `completed`。
 
 ### 查询最终结果
 
@@ -267,20 +267,20 @@ Mock 执行会随时间推进进度；完成后返回 `completed`，并把任务
   "task_id": "T39FD9B11EB89",
   "run_id": "R10D44A4973C",
   "status": "completed",
-  "total_time": 2.0,
+  "total_time": 12.0,
   "total_tested": 60000,
   "total_recovered": 3,
   "strategy_results": [
     {
       "strategy_id": "S1",
-      "time": 0.67,
+      "time": 4.0,
       "tested": 20000,
       "recovered": 1,
       "success_rate": 0.00005
     },
     {
       "strategy_id": "S4",
-      "time": 1.33,
+      "time": 8.0,
       "tested": 40000,
       "recovered": 2,
       "success_rate": 0.00005
