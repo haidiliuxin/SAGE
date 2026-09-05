@@ -59,12 +59,13 @@ async function openForm(t, fetchHandler) {
   }
 }
 
-function remoteFlow(strategyIds = ['S1']) {
+function remoteFlow(strategyIds = ['S1'], overrides = {}) {
   let submitted
   const taskId = 'T-TEST'
   const runId = 'R-TEST'
+  const strategyNames = { S1: 'Baseline', S2: 'Rule', S3: 'PCFG-lite', S4: 'Context' }
   const strategies = strategyIds.map((strategy_id, index) => ({
-    strategy_id, strategy_name: strategy_id === 'S4' ? 'Context' : 'Baseline',
+    strategy_id, strategy_name: strategyNames[strategy_id] ?? strategy_id,
     priority: index + 1, time_budget: 10, candidate_budget: 100,
     reason: 'test fixture', parameters: {},
   }))
@@ -78,9 +79,9 @@ function remoteFlow(strategyIds = ['S1']) {
       task_id: taskId, target_type: 'hash', algorithm: 'unknown', salt: null,
       verification_cost: 'unknown', context_available: false, candidate_space: null,
       time_budget: 300, candidate_budget: 100000, status: 'analyzed', confidence: 0,
-      warnings: [],
+      warnings: [], ...overrides.prir,
     }
-    else if (url.endsWith('/plan')) data = { task_id: taskId, planner_type: 'mock', total_time_budget: 300, strategies, status: 'planned', warnings: [] }
+    else if (url.endsWith('/plan')) data = { task_id: taskId, planner_type: 'mock', total_time_budget: 300, strategies, status: 'planned', warnings: [], ...overrides.plan }
     else if (url.endsWith('/execute')) data = { task_id: taskId, run_id: runId, status: 'running', started_at: new Date().toISOString() }
     else if (url.endsWith('/status')) data = { task_id: taskId, run_id: runId, status: 'completed', progress: 1, current_strategy: null, elapsed_time: 2, tested: 123, recovered: 2, message: 'done' }
     else if (url.endsWith('/result')) data = {
@@ -145,4 +146,40 @@ test('backend connection failure shows an error, never a local success result', 
   await form.submit()
   assert.match(text(form.renderer.root), /Network unavailable/)
   assert.equal(form.renderer.root.findAllByType('article').filter((node) => node.props.className === 'result-strip').length, 0)
+})
+
+test('switching from hash to a file target clears stale algorithm and constrains file type', async (t) => {
+  const form = await openForm(t, remoteFlow().handler)
+  const targetLabel = form.renderer.root.findAllByType('label').find((node) => text(node).startsWith('目标类型'))
+  await act(async () => targetLabel.findByType('select').props.onChange({ target: { value: 'zip' } }))
+
+  assert.equal(form.input('已知算法').props.value, '')
+  assert.equal(form.renderer.root.findByProps({ className: 'upload-box' }).findByType('input').props.accept, '.zip,application/zip')
+})
+
+test('workspace renders backend PRIR, rule plan budgets, parameters and warnings', async (t) => {
+  const remote = remoteFlow(['S1', 'S2', 'S3', 'S4'], {
+    prir: {
+      algorithm: 'bcrypt', salt: true, verification_cost: 'high',
+      context_available: true, confidence: 0.91,
+      warnings: ['分析器降级提示'],
+    },
+    plan: {
+      planner_type: 'rule',
+      warnings: ['慢 Hash 采用高概率小候选集'],
+    },
+  })
+  const form = await openForm(t, remote.handler)
+  await form.submit()
+  const pageText = text(form.renderer.root)
+
+  assert.match(pageText, /规则规划/)
+  assert.match(pageText, /bcrypt/)
+  assert.match(pageText, /包含盐值/)
+  assert.match(pageText, /高（慢速验证）/)
+  assert.match(pageText, /可用于 S4/)
+  assert.match(pageText, /已分配候选/)
+  assert.match(pageText, /默认参数/)
+  assert.match(pageText, /分析器降级提示/)
+  assert.match(pageText, /慢 Hash 采用高概率小候选集/)
 })

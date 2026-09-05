@@ -24,6 +24,12 @@ class Planner(Protocol):
     def plan(self, prir: PRIR) -> StrategyPlan: ...
 
 
+class PlanValidator(Protocol):
+    """丙负责实现：校验不可信策略计划是否可安全执行。"""
+
+    def validate(self, prir: PRIR, plan: StrategyPlan) -> StrategyPlan: ...
+
+
 class Executor(Protocol):
     """乙负责第一周 Mock 实现；后续可替换为真实适配器。"""
 

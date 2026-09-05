@@ -2,7 +2,7 @@
 
 SAGE-Pass 是面向异构离线口令安全评测任务的智能策略编排系统。本仓库当前完成第 1 周后端基础与 Mock 链路、第 2 周甲的真实执行层：FastAPI 项目、SQLite 持久化、公共数据结构、任务 API、文件接入、PRIR 分析、Mock Planner、Mock/Real Executor、Hashcat 适配器与 ZIP（WinZip AES）真实接入。
 
-> Analyzer、Planner 与 Executor 均按团队统一接口实现。Mock 执行用于第一周链路演示；`mode: real` 会调用本机 Hashcat（ZIP 目标还需 zip2john）执行真实恢复，时间/候选预算用尽会自动停止。LLM 规划、动态调度与持久化恢复由后续周次接入。
+> Analyzer、Planner 与 Executor 均按团队统一接口实现。Mock 执行用于第一周链路演示；`mode: real` 会调用本机 Hashcat（ZIP 目标还需 zip2john）执行真实恢复，时间/候选预算用尽会自动停止。Planner 支持 OpenAI Responses API 和 OpenAI 兼容的 Chat Completions API（包括硅基流动）。
 
 ## 已完成
 
@@ -17,6 +17,9 @@ SAGE-Pass 是面向异构离线口令安全评测任务的智能策略编排系�
 - Hashcat Adapter：真实执行的启动、停止（取消）、时间预算自动停止与恢复结果解析（含 `$HEX[]`）；
 - ZIP Adapter：zip2john 提取 WinZip AES（`$zip2$`，hashcat 13600），传统 PKZIP 明确报不支持；
 - Real Executor：`mode: real` 逐策略运行 Hashcat，写回 `StrategyRunModel` 并把任务推进到终态，运行中可取消；
+- LLM Planner：只向模型发送结构化 PRIR，使用严格 JSON Schema 输出，支持温度、超时、最大输出 token、进程内 TTL/LRU 缓存及异常降级；
+- Policy Validator：在计划进入执行链路前校验策略白名单、目标适用性、双预算、优先级和参数范围；
+- Rule Planner：无上下文按 S1→S2→S3，有上下文追加 S4；慢 Hash 将上下文高概率策略提前并限制候选池规模；
 - pytest 覆盖任务、文件、状态机、乙链路、适配器与真实执行链路。
 - Mock Executor：启动模拟执行、查询执行状态、返回最终模拟结果；
 - pytest 覆盖任务、文件、状态机、乙方链路和错误格式。
@@ -41,6 +44,30 @@ py -3.12 -m venv .venv
 
 真实执行需在本机提供 Hashcat（ZIP 目标另需 zip2john），通过 `SAGE_HASHCAT_PATH` / `SAGE_ZIP2JOHN_PATH` 配置；未配置时 mock 链路不受影响，真实执行返回清晰的 `503` 提示。
 
+启用 LLM Planner：
+
+```text
+SAGE_PLANNER_TYPE=llm
+OPENAI_API_KEY=...
+SAGE_LLM_MODEL=gpt-4.1-mini
+```
+
+使用硅基流动：
+
+```text
+SAGE_PLANNER_TYPE=llm
+OPENAI_API_KEY=...
+OPENAI_BASE_URL=https://api.siliconflow.cn/v1
+SAGE_LLM_API_STYLE=chat_completions
+SAGE_LLM_MODEL=deepseek-ai/DeepSeek-V4-Flash
+```
+
+`responses` 模式调用 OpenAI Responses API；`chat_completions` 模式调用兼容的 `/chat/completions`，并通过 `response_format.json_schema` 请求固定 JSON。修改 `.env` 后需完全重启后端进程。
+
+其余生成限制和缓存配置见 `.env.example`。LLM 请求、输出校验或预算校验失败时会降级，并在 `warnings` 中说明。
+
+如需完全不使用 LLM，可设置 `SAGE_PLANNER_TYPE=rule`。当选择 `llm` 但缺少 API Key，或者 LLM 请求/输出校验失败时，系统会使用 Rule Planner；规则规划也无法处理目标时才最终降级至 Mock。
+
 ## 测试
 
 ```powershell
@@ -58,7 +85,8 @@ src/sage_pass/
   main.py            FastAPI 应用与异常处理
   routes.py          HTTP 路由（含 real/mock 执行分派）
   analyzer.py        Analyzer 与 PRIR 持久化转换（ZIP 真实解析）
-  planner.py         Mock Planner
+  planner.py         Mock/LLM Planner、结构化输出与缓存
+  policy.py          LLM 策略计划白名单与安全约束校验
   executor.py        Mock Executor
   real_executor.py   Real Executor：逐策略 Hashcat 执行与运行态
   hashcat_adapter.py Hashcat 适配器（启动/停止/超时/结果解析）

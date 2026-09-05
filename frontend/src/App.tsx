@@ -1,7 +1,17 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError } from './api/client'
 import { parseContextLists } from './context-input'
-import type { FileDetail, FlowSnapshot, RunStatus, TargetType, TaskDetail, TaskInput, TaskStatus } from './types'
+import type {
+  FileDetail,
+  FlowSnapshot,
+  PlannerType,
+  PRIR,
+  RunStatus,
+  TargetType,
+  TaskDetail,
+  TaskInput,
+  TaskStatus,
+} from './types'
 
 type View = 'overview' | 'new' | 'workspace' | 'tasks'
 type FlowStage = 'idle' | 'uploading' | 'creating' | 'analyzing' | 'planning' | 'executing' | 'completed' | 'cancelled' | 'error'
@@ -13,11 +23,11 @@ const blankInput: TaskInput = {
   time_budget: 300,
   candidate_budget: 100000,
   context: {
-    keywords: ['学校名称', '实验室'],
-    years: [2025, 2026],
-    region: '北京',
-    organization: '示例大学',
-    description: '用于竞赛演示的已授权离线样本',
+    keywords: [],
+    years: [],
+    region: '',
+    organization: '',
+    description: '',
   },
 }
 
@@ -51,6 +61,48 @@ const taskStatusLabels: Record<TaskStatus, string> = {
   completed: '已完成',
   failed: '失败',
   cancelled: '已取消',
+}
+
+const targetTypeLabels: Record<TargetType, string> = {
+  hash: 'Hash 文本',
+  zip: 'ZIP 压缩包',
+  pdf: 'PDF 文档',
+  office: 'Office 文档',
+  unknown: '待识别目标',
+}
+
+const verificationCostLabels: Record<PRIR['verification_cost'], string> = {
+  low: '低（快速验证）',
+  medium: '中等',
+  high: '高（慢速验证）',
+  unknown: '尚未确定',
+}
+
+const plannerTypeLabels: Record<PlannerType, string> = {
+  mock: 'Mock 降级',
+  rule: '规则规划',
+  llm: 'LLM 规划',
+  adaptive: '自适应规划',
+}
+
+const strategyParameterLabels: Record<string, string> = {
+  capitalize_first: '首字母大写',
+  all_upper: '全大写',
+  all_lower: '全小写',
+  common_number_suffix: '数字后缀',
+  year_suffix: '年份后缀',
+  common_substitution: '常见替换',
+  symbol_suffix: '符号后缀',
+  max_templates: '模板上限',
+  min_probability: '最小概率',
+  max_structure_length: '结构长度',
+  use_keywords: '关键词',
+  use_pinyin: '拼音',
+  use_abbreviations: '缩写',
+  use_years: '年份',
+  use_region: '地区',
+  use_organization: '组织',
+  max_combinations: '组合上限',
 }
 
 const workflow = [
@@ -96,6 +148,23 @@ function formatBytes(value: number) {
   if (value < 1024) return `${value} B`
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
   return `${(value / 1024 / 1024).toFixed(1)} MB`
+}
+
+function formatStrategyParameters(parameters: Record<string, unknown>) {
+  const entries = Object.entries(parameters)
+    .filter(([, value]) => value !== false && value !== null && value !== undefined)
+  if (entries.length === 0) return '默认参数'
+  return entries.map(([key, value]) => {
+    const label = strategyParameterLabels[key] ?? key
+    return value === true ? label : `${label} ${String(value)}`
+  }).join(' · ')
+}
+
+function fileAccept(targetType: TargetType) {
+  if (targetType === 'zip') return '.zip,application/zip'
+  if (targetType === 'pdf') return '.pdf,application/pdf'
+  if (targetType === 'office') return '.doc,.docx,.xls,.xlsx,.ppt,.pptx'
+  return undefined
 }
 
 function App() {
@@ -212,6 +281,19 @@ function App() {
 
   const updateContext = (key: keyof TaskInput['context'], value: string[] | number[] | string) =>
     setForm((current) => ({ ...current, context: { ...current.context, [key]: value } }))
+
+  const updateTargetType = (type: TargetType) => {
+    setFile(null)
+    setForm((current) => ({
+      ...current,
+      known_algorithm: null,
+      target: {
+        type,
+        content: type === 'hash' ? '' : null,
+        file_id: null,
+      },
+    }))
+  }
 
   const runFlow = async (event?: FormEvent) => {
     event?.preventDefault()
@@ -339,8 +421,8 @@ function App() {
 
         <div className="sidebar-foot">
           <span className="eyebrow">SYSTEM</span>
-          <strong>Mock orchestration</strong>
-          <p>第一阶段 · 统一接口</p>
+          <strong>Policy orchestration</strong>
+          <p>第二周 · 智能策略规划</p>
           <div className={`system-status ${health}`}><i /> {health === 'online' ? '后端服务正常' : health === 'offline' ? '后端服务离线' : '正在检查服务'}</div>
         </div>
       </aside>
@@ -372,7 +454,7 @@ function App() {
                 <div className="signal-orbit"><span className="orbit-core">SAGE</span><i/><i/><i/></div>
                 <div className="visual-metrics">
                   <div><small>任务画像</small><strong>PRIR</strong></div>
-                  <div><small>策略空间</small><strong>S1—S5</strong></div>
+                  <div><small>策略空间</small><strong>S1—S4</strong></div>
                   <div><small>执行模式</small><strong>MOCK</strong></div>
                 </div>
               </div>
@@ -399,26 +481,26 @@ function App() {
           <section className="page form-page">
             <div className="page-title">
               <div><span className="section-kicker">NEW ASSESSMENT</span><h1>创建安全评测</h1></div>
-              <p>填写目标、预算与可用上下文，系统将自动模拟完整策略链路。</p>
+              <p>任务创建后将调用后端生成 PRIR、编排 S1～S4 策略，并以 Mock 执行展示完整结果。</p>
             </div>
             <form onSubmit={runFlow} className="assessment-form">
               <div className="form-section">
                 <div className="form-section-title"><span>01</span><div><h2>任务与目标</h2><p>定义本次授权评测的基础信息</p></div></div>
                 <div className="form-grid two">
                   <label><span>任务名称</span><input value={form.name} onChange={(e) => updateForm('name', e.target.value)} required /></label>
-                  <label><span>目标类型</span><select value={form.target.type} onChange={(e) => updateForm('target', { ...form.target, type: e.target.value as TargetType, content: e.target.value === 'hash' ? form.target.content : null })}><option value="hash">Hash 文本</option><option value="zip">ZIP 压缩包</option><option value="pdf">PDF 文档</option><option value="office">Office 文档</option><option value="unknown">待识别</option></select></label>
+                  <label><span>目标类型</span><select value={form.target.type} onChange={(e) => updateTargetType(e.target.value as TargetType)}><option value="hash">Hash 文本</option><option value="zip">ZIP 压缩包</option><option value="pdf">PDF 文档</option><option value="office">Office 文档</option><option value="unknown">待识别</option></select></label>
                 </div>
                 {form.target.type === 'hash' ? (
                   <label className="wide"><span>Hash 内容</span><textarea rows={3} value={form.target.content ?? ''} onChange={(e) => updateForm('target', { ...form.target, content: e.target.value, file_id: null })} placeholder="粘贴经过授权的离线 Hash" required /></label>
                 ) : (
                   <label className="upload-box">
-                    <input type="file" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+                    <input type="file" accept={fileAccept(form.target.type)} onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
                     <span className="upload-icon"><Icon name="upload" /></span>
                     <strong>{file?.name ?? '选择评测文件'}</strong>
                     <small>{file ? `${(file.size / 1024).toFixed(1)} KB` : 'ZIP、PDF 或 Office 文件，仅传递 file_id'}</small>
                   </label>
                 )}
-                <label className="wide"><span>已知算法（可选）</span><input value={form.known_algorithm ?? ''} onChange={(e) => updateForm('known_algorithm', e.target.value || null)} placeholder="例如 bcrypt、SHA-256；留空则自动识别" /></label>
+                <label className="wide"><span>已知算法（可选）</span><input value={form.known_algorithm ?? ''} onChange={(e) => updateForm('known_algorithm', e.target.value.trim() || null)} placeholder={form.target.type === 'hash' ? '例如 bcrypt、md5、sha256；留空则自动识别' : '确认文件加密算法时填写；否则留空交由后端提取器识别'} /></label>
               </div>
 
               <div className="form-section">
@@ -430,19 +512,19 @@ function App() {
               </div>
 
               <div className="form-section">
-                <div className="form-section-title"><span>03</span><div><h2>上下文信息</h2><p>为 Context 策略提供可解释线索</p></div></div>
+                <div className="form-section-title"><span>03</span><div><h2>上下文信息（可选）</h2><p>至少填写一项后启用 Context 策略；不了解的信息请留空</p></div></div>
                 <div className="form-grid two">
-                  <label><span>关键词 <em>用逗号分隔</em></span><input value={keywordText} onChange={(e) => setKeywordText(e.target.value)} /></label>
-                  <label><span>相关年份 <em>用逗号分隔</em></span><input value={yearText} onChange={(e) => setYearText(e.target.value)} /></label>
-                  <label><span>地区</span><input value={form.context.region} onChange={(e) => updateContext('region', e.target.value)} /></label>
-                  <label><span>组织</span><input value={form.context.organization} onChange={(e) => updateContext('organization', e.target.value)} /></label>
+                  <label><span>关键词 <em>推荐填写，用逗号分隔</em></span><input value={keywordText} onChange={(e) => setKeywordText(e.target.value)} placeholder="例如：姓名、学校、项目名" /></label>
+                  <label><span>相关年份 <em>可选，用逗号分隔</em></span><input value={yearText} onChange={(e) => setYearText(e.target.value)} placeholder="例如：2024，2025" /></label>
+                  <label><span>地区 <em>可选</em></span><input value={form.context.region} onChange={(e) => updateContext('region', e.target.value)} placeholder="例如：北京" /></label>
+                  <label><span>组织 <em>可选</em></span><input value={form.context.organization} onChange={(e) => updateContext('organization', e.target.value)} placeholder="例如：学校、公司或实验室" /></label>
                 </div>
-                <label className="wide"><span>补充说明</span><textarea rows={3} value={form.context.description} onChange={(e) => updateContext('description', e.target.value)} /></label>
+                <label className="wide"><span>补充说明 <em>可选</em></span><textarea rows={3} value={form.context.description} onChange={(e) => updateContext('description', e.target.value)} placeholder="填写其他有助于生成候选的信息；不确定时请留空" /></label>
               </div>
 
               <div className="form-footer">
                 <p><Icon name="shield" size={16} /> 请确认目标属于已获授权的离线安全评测范围。</p>
-                <button className="button primary large" type="submit">启动全过程模拟 <Icon name="play" size={15} /></button>
+                <button className="button primary large" type="submit">创建并运行评测流程 <Icon name="play" size={15} /></button>
               </div>
             </form>
           </section>
@@ -496,19 +578,21 @@ function App() {
 
                 <div className="workspace-grid">
                   <article className="panel plan-panel">
-                    <div className="panel-head"><div><span className="section-kicker">STRATEGY PLAN</span><h2>策略编排</h2></div><span className="panel-tag">{snapshot.plan?.planner_type ?? '等待中'}</span></div>
+                    <div className="panel-head"><div><span className="section-kicker">STRATEGY PLAN</span><h2>策略编排</h2></div><span className="panel-tag">{snapshot.plan ? plannerTypeLabels[snapshot.plan.planner_type] : '等待中'}</span></div>
                     <div className="strategy-list">
                       {snapshot.plan?.strategies.map((strategy) => {
                         const current = snapshot.status?.current_strategy === strategy.strategy_id
                         const result = snapshot.result?.strategy_results.find((item) => item.strategy_id === strategy.strategy_id)
-                        return <div className={`strategy-row ${current ? 'current' : ''}`} key={strategy.strategy_id}><span className="strategy-id">{strategy.strategy_id}</span><div className="strategy-main"><div><strong>{strategy.strategy_name}</strong>{current && <em>执行中</em>}</div><p>{strategy.reason}</p><div className="budget-bar"><i style={{ width: `${Math.min(100, strategy.time_budget / snapshot.plan!.total_time_budget * 100)}%` }} /></div></div><div className="strategy-stat"><strong>{result?.recovered ?? '—'}</strong><small>恢复</small></div><div className="strategy-stat"><strong>{strategy.time_budget}s</strong><small>预算</small></div></div>
+                        return <div className={`strategy-row ${current ? 'current' : ''}`} key={strategy.strategy_id}><span className="strategy-id">{strategy.strategy_id}</span><div className="strategy-main"><div><strong>{strategy.strategy_name}</strong>{current && <em>执行中</em>}</div><p>{strategy.reason}</p><small className="strategy-meta">优先级 {strategy.priority} · 候选 {formatNumber(strategy.candidate_budget)} · {formatStrategyParameters(strategy.parameters)}</small><div className="budget-bar"><i style={{ width: `${Math.min(100, strategy.time_budget / snapshot.plan!.total_time_budget * 100)}%` }} /></div></div><div className="strategy-stat"><strong>{result?.recovered ?? '—'}</strong><small>恢复</small></div><div className="strategy-stat"><strong>{strategy.time_budget}s</strong><small>时间预算</small></div></div>
                       }) ?? <div className="panel-placeholder"><span className="loader" />正在等待策略计划</div>}
                     </div>
+                    {snapshot.plan && <div className="plan-summary"><span>已分配时间 <strong>{snapshot.plan.strategies.reduce((sum, item) => sum + item.time_budget, 0)} / {snapshot.plan.total_time_budget}s</strong></span><span>已分配候选 <strong>{formatNumber(snapshot.plan.strategies.reduce((sum, item) => sum + item.candidate_budget, 0))} / {formatNumber(snapshot.prir?.candidate_budget)}</strong></span></div>}
+                    {snapshot.plan?.warnings.length ? <div className="notice-list"><strong>规划提示</strong>{snapshot.plan.warnings.map((warning, index) => <p key={`${warning}-${index}`}>{warning}</p>)}</div> : null}
                   </article>
 
                   <article className="panel prir-panel">
                     <div className="panel-head"><div><span className="section-kicker">TASK PROFILE</span><h2>PRIR 画像</h2></div><span className="confidence">{snapshot.prir ? `${Math.round(snapshot.prir.confidence * 100)}% 置信度` : '分析中'}</span></div>
-                    {snapshot.prir ? <dl className="profile-list"><div><dt>目标类型</dt><dd>{snapshot.prir.target_type}</dd></div><div><dt>识别算法</dt><dd>{snapshot.prir.algorithm}</dd></div><div><dt>验证成本</dt><dd><span className={`cost ${snapshot.prir.verification_cost}`}>{snapshot.prir.verification_cost}</span></dd></div><div><dt>候选空间</dt><dd>{formatNumber(snapshot.prir.candidate_space)}</dd></div><div><dt>上下文</dt><dd>{snapshot.prir.context_available ? '可用' : '不可用'}</dd></div><div><dt>任务编号</dt><dd>{snapshot.prir.task_id}</dd></div></dl> : <div className="panel-placeholder"><span className="loader" />正在建立统一任务画像</div>}
+                    {snapshot.prir ? <><dl className="profile-list"><div><dt>目标类型</dt><dd>{targetTypeLabels[snapshot.prir.target_type]}</dd></div><div><dt>识别算法</dt><dd>{snapshot.prir.algorithm === 'unknown' ? '尚未确定' : snapshot.prir.algorithm}</dd></div><div><dt>盐值</dt><dd>{snapshot.prir.salt === null ? '尚未确定' : snapshot.prir.salt ? '包含盐值' : '无盐'}</dd></div><div><dt>验证成本</dt><dd><span className={`cost ${snapshot.prir.verification_cost}`}>{verificationCostLabels[snapshot.prir.verification_cost]}</span></dd></div><div><dt>候选空间</dt><dd>{formatNumber(snapshot.prir.candidate_space)}</dd></div><div><dt>上下文</dt><dd>{snapshot.prir.context_available ? '可用于 S4' : '未提供'}</dd></div><div><dt>时间预算</dt><dd>{snapshot.prir.time_budget}s</dd></div><div><dt>候选预算</dt><dd>{formatNumber(snapshot.prir.candidate_budget)}</dd></div><div><dt>任务编号</dt><dd>{snapshot.prir.task_id}</dd></div></dl>{snapshot.prir.warnings.length ? <div className="notice-list"><strong>分析提示</strong>{snapshot.prir.warnings.map((warning, index) => <p key={`${warning}-${index}`}>{warning}</p>)}</div> : null}</> : <div className="panel-placeholder"><span className="loader" />正在建立统一任务画像</div>}
                   </article>
                 </div>
 

@@ -10,7 +10,6 @@ from .analyzer import MockAnalyzer, prir_to_schema
 from .enums import ExecutionMode, TaskStatus
 from .errors import AppError
 from .executor import MockExecutor
-from .planner import MockPlanner
 from .repository import FileRepository, PRIRRepository, TaskRepository
 from .schemas import (
     ErrorResponse,
@@ -178,7 +177,9 @@ def analyze_task(
     responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
     tags=["planner"],
 )
-def plan_task(task_id: str, session: SessionDependency) -> StrategyPlan:
+def plan_task(
+    request: Request, task_id: str, session: SessionDependency
+) -> StrategyPlan:
     task = require_task(session, task_id)
     current = TaskStatus(task.status)
     if current not in {TaskStatus.ANALYZED, TaskStatus.PLANNED}:
@@ -196,7 +197,7 @@ def plan_task(task_id: str, session: SessionDependency) -> StrategyPlan:
             status_code=409,
             details={"task_id": task_id},
         )
-    plan = MockPlanner().plan(prir_to_schema(prir_model))
+    plan = request.app.state.planner.plan(prir_to_schema(prir_model))
     if current == TaskStatus.ANALYZED:
         update_task_status(session, task, TaskStatus.PLANNED)
     return plan
@@ -231,7 +232,7 @@ def execute_task(
             status_code=409,
             details={"task_id": task_id},
         )
-    plan = MockPlanner().plan(prir_to_schema(prir_model))
+    plan = request.app.state.planner.plan(prir_to_schema(prir_model))
     task_detail = task_to_schema(task)
     if payload.mode == ExecutionMode.REAL:
         started = request.app.state.real_executor.start(

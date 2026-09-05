@@ -50,7 +50,7 @@ export const api = {
   uploadFile(file: File) {
     const data = new FormData()
     data.append('file', file)
-    return request<{ file_id: string }>('/api/files', { method: 'POST', body: data })
+    return request<FileDetail>('/api/files', { method: 'POST', body: data })
   },
 
   createTask(input: TaskInput) {

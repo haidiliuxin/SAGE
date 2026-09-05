@@ -165,8 +165,11 @@ main { grid-column: 2; min-width: 0; }
 .strategy-id { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; background: #e8ebe5; color: #4f6253; font: 600 9px Georgia, serif; }
 .strategy-main > div { display: flex; align-items: center; gap: 8px; }.strategy-main strong { font-size: 10px; }.strategy-main em { padding: 3px 5px; background: #dfe9dc; color: #4e6d53; font-size: 7px; font-style: normal; }
 .strategy-main p { margin: 4px 0 9px; color: #898c85; font-size: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.strategy-meta { display: block; margin: -3px 0 8px; color: #92968f; font-size: 7px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .budget-bar { width: 100%; height: 2px; background: #e2e4de; }.budget-bar i { display: block; height: 100%; background: #738778; }
 .strategy-stat { text-align: right; }.strategy-stat strong, .strategy-stat small { display: block; }.strategy-stat strong { font: 500 11px Georgia, serif; }.strategy-stat small { margin-top: 3px; color: #9a9c97; font-size: 7px; }
+.plan-summary { display: flex; justify-content: space-between; gap: 16px; padding-top: 13px; color: #8a8d86; font-size: 8px; }.plan-summary strong { margin-left: 4px; color: #4d514b; font-weight: 600; }
+.notice-list { margin-top: 14px; padding: 12px 14px; border-left: 2px solid #9b8064; background: #f4f0e9; color: #766b5f; }.notice-list strong { display: block; margin-bottom: 5px; color: #63584d; font-size: 9px; }.notice-list p { margin: 3px 0 0; font-size: 8px; line-height: 1.55; }
 .panel-placeholder { height: 215px; display: flex; align-items: center; justify-content: center; gap: 11px; color: #959891; font-size: 9px; }
 .loader { width: 13px; height: 13px; border: 1px solid #bfc3ba; border-top-color: #536557; border-radius: 50%; animation: spin .8s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
 .profile-list { margin: 0; }.profile-list div { display: flex; justify-content: space-between; align-items: center; padding: 13px 1px; border-bottom: 1px solid #e8e9e4; }.profile-list dt { color: #8a8d86; font-size: 12px; }.profile-list dd { margin: 0; font: 500 10px Georgia, 'Noto Sans SC', sans-serif; max-width: 65%; overflow: hidden; text-overflow: ellipsis; }
