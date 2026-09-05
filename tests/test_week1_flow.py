@@ -40,7 +40,7 @@ def test_analyze_plan_execute_mock_hash_task(client, hash_task_payload):
     assert [item["strategy_id"] for item in body["strategy_results"]] == ["S1", "S4"]
 
 
-def test_analyze_file_task_uses_metadata_level_prir(client):
+def test_analyze_file_task_without_zip2john_degrades_gracefully(client):
     uploaded = client.post(
         "/api/files",
         files={"file": ("sample.zip", b"PK-test", "application/zip")},
@@ -59,6 +59,8 @@ def test_analyze_file_task_uses_metadata_level_prir(client):
     )
     task_id = created.json()["task_id"]
 
+    # 未安装/配置 zip2john 时，ZIP 分析应降级为元数据级 PRIR（200），
+    # 而不是 500；提示信息不依赖运行环境中的具体二进制行为。
     analyzed = client.post(f"/api/tasks/{task_id}/analyze")
     assert analyzed.status_code == 200
     body = analyzed.json()
@@ -66,7 +68,7 @@ def test_analyze_file_task_uses_metadata_level_prir(client):
     assert body["algorithm"] == "unknown"
     assert body["verification_cost"] == "unknown"
     assert body["candidate_space"] is None
-    assert body["warnings"] == ["第一周仅基于文件元数据生成 PRIR，未解析加密结构"]
+    assert body["warnings"], "应包含降级提示，说明未能解析加密结构"
 
 
 def test_execute_requires_planned_task(client, hash_task_payload):

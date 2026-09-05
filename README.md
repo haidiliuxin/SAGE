@@ -1,8 +1,8 @@
 # SAGE-Pass
 
-SAGE-Pass 是面向异构离线口令安全评测任务的智能策略编排系统。本仓库当前完成第 1 周后端基础与乙方 Mock 链路：FastAPI 项目、SQLite 持久化、公共数据结构、任务 API、文件接入、PRIR 分析、Mock Planner 和 Mock Executor。
+SAGE-Pass 是面向异构离线口令安全评测任务的智能策略编排系统。本仓库当前完成第 1 周后端基础与 Mock 链路、第 2 周甲的真实执行层：FastAPI 项目、SQLite 持久化、公共数据结构、任务 API、文件接入、PRIR 分析、Mock Planner、Mock/Real Executor、Hashcat 适配器与 ZIP（WinZip AES）真实接入。
 
-> 当前版本不执行真实口令恢复。Analyzer、Planner 和 Executor 已按第一周统一接口接入 Mock 实现，真实 Hashcat/JtR、调度算法和 LLM 由后续版本替换。
+> Analyzer、Planner 与 Executor 均按团队统一接口实现。Mock 执行用于第一周链路演示；`mode: real` 会调用本机 Hashcat（ZIP 目标还需 zip2john）执行真实恢复，时间/候选预算用尽会自动停止。LLM 规划、动态调度与持久化恢复由后续周次接入。
 
 ## 已完成
 
@@ -11,8 +11,13 @@ SAGE-Pass 是面向异构离线口令安全评测任务的智能策略编排系�
 - Pydantic 公共契约：Task、PRIR、StrategyPlan、执行状态与结果；
 - 任务创建、列表、详情、受控状态更新 API；
 - 文件上传与元数据查询 API，任务之间只传 `file_id`；
-- Analyzer：支持 Hash 文本和文件元数据输入，生成并持久化 PRIR；
-- Mock Planner：根据 PRIR 生成第一周 `mock` 策略计划；
+- Analyzer：支持 Hash 文本和 ZIP/PDF/Office 元数据输入，ZIP 经 zip2john 真实解析（无工具时降级提示），生成并持久化 PRIR；
+- Mock Planner：根据 PRIR 生成 `mock` 策略计划；
+- Mock Executor：启动模拟执行、查询执行状态、返回最终模拟结果；
+- Hashcat Adapter：真实执行的启动、停止（取消）、时间预算自动停止与恢复结果解析（含 `$HEX[]`）；
+- ZIP Adapter：zip2john 提取 WinZip AES（`$zip2$`，hashcat 13600），传统 PKZIP 明确报不支持；
+- Real Executor：`mode: real` 逐策略运行 Hashcat，写回 `StrategyRunModel` 并把任务推进到终态，运行中可取消；
+- pytest 覆盖任务、文件、状态机、乙链路、适配器与真实执行链路。
 - Mock Executor：启动模拟执行、查询执行状态、返回最终模拟结果；
 - pytest 覆盖任务、文件、状态机、乙方链路和错误格式。
 
@@ -34,30 +39,37 @@ py -3.12 -m venv .venv
 
 默认数据库为 `data/sage_pass.db`，上传目录为 `data/uploads/`。配置项见 `.env.example`。
 
+真实执行需在本机提供 Hashcat（ZIP 目标另需 zip2john），通过 `SAGE_HASHCAT_PATH` / `SAGE_ZIP2JOHN_PATH` 配置；未配置时 mock 链路不受影响，真实执行返回清晰的 `503` 提示。
+
 ## 测试
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-接口详情见 [docs/API.md](docs/API.md)，本周交接见 [docs/handoff/week1-A.md](docs/handoff/week1-A.md) 和 [docs/handoff/week1-B.md](docs/handoff/week1-B.md)。
+适配器与真实执行测试使用可控仿真可执行程序（见 `tests/sim_binaries.py`），不需要本机安装真实 hashcat/zip2john。
+
+接口详情见 [docs/API.md](docs/API.md)，各周交接见 [docs/handoff/week1-A.md](docs/handoff/week1-A.md)、[docs/handoff/week1-B.md](docs/handoff/week1-B.md) 与 [docs/handoff/week2-A.md](docs/handoff/week2-A.md)。
 
 ## 目录
 
 ```text
 src/sage_pass/
-  main.py          FastAPI 应用与异常处理
-  routes.py        HTTP 路由
-  analyzer.py      第一周 Mock Analyzer 与 PRIR 持久化转换
-  planner.py       第一周 Mock Planner
-  executor.py      第一周 Mock Executor
-  schemas.py       公共输入输出契约
-  contracts.py     Analyzer/Planner/Executor Protocol
-  models.py        数据库模型
-  service.py       任务状态机与文件存储
-  repository.py    数据访问
-tests/             自动化测试
-docs/              接口与交接材料
+  main.py            FastAPI 应用与异常处理
+  routes.py          HTTP 路由（含 real/mock 执行分派）
+  analyzer.py        Analyzer 与 PRIR 持久化转换（ZIP 真实解析）
+  planner.py         Mock Planner
+  executor.py        Mock Executor
+  real_executor.py   Real Executor：逐策略 Hashcat 执行与运行态
+  hashcat_adapter.py Hashcat 适配器（启动/停止/超时/结果解析）
+  zip_adapter.py     zip2john ZIP（WinZip AES）适配器
+  schemas.py         公共输入输出契约
+  contracts.py       Analyzer/Planner/Executor Protocol
+  models.py          数据库模型
+  service.py         任务状态机与文件存储
+  repository.py      数据访问
+tests/               自动化测试
+docs/                接口与交接材料
 ```
 
 ## 合规边界

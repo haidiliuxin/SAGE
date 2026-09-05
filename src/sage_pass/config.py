@@ -15,6 +15,8 @@ class Settings:
     upload_dir: Path
     max_upload_bytes: int
     cors_origins: tuple[str, ...]
+    hashcat_path: str = "hashcat"
+    zip2john_path: str = "zip2john"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -32,4 +34,6 @@ class Settings:
             upload_dir=_as_path(os.getenv("SAGE_UPLOAD_DIR", "./data/uploads")),
             max_upload_bytes=int(os.getenv("SAGE_MAX_UPLOAD_BYTES", "10485760")),
             cors_origins=tuple(item.strip() for item in origins.split(",") if item.strip()),
+            hashcat_path=os.getenv("SAGE_HASHCAT_PATH", "hashcat"),
+            zip2john_path=os.getenv("SAGE_ZIP2JOHN_PATH", "zip2john"),
         )
