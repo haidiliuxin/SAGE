@@ -1,23 +1,40 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
 from .enums import TargetType, TaskStatus, VerificationCost
 from .errors import AppError
 from .models import PRIRModel
-from .repository import PRIRRepository
+from .repository import FileRepository, PRIRRepository
 from .schemas import PRIR, TaskContext, TaskDetail
 from .service import now_iso
+from .zip_adapter import ZipHashExtractor
+
+ZIP_ALGORITHM = "zip-aes"
 
 
 class MockAnalyzer:
-    def __init__(self, session: Session) -> None:
+    def __init__(
+        self,
+        session: Session,
+        *,
+        zip_extractor: ZipHashExtractor | None = None,
+        upload_dir: Path | None = None,
+    ) -> None:
         self.session = session
+        self.zip_extractor = zip_extractor
+        self.upload_dir = upload_dir
 
     def analyze(self, task: TaskDetail) -> PRIR:
-        algorithm, salt, cost, confidence, warnings = _analyze_target(task)
+        algorithm, salt, cost, confidence, warnings = _analyze_target(
+            task,
+            session=self.session,
+            zip_extractor=self.zip_extractor,
+            upload_dir=self.upload_dir,
+        )
         prir = PRIR(
             task_id=task.task_id,
             target_type=task.target.type,
@@ -93,6 +110,10 @@ def _has_context(context: TaskContext) -> bool:
 
 def _analyze_target(
     task: TaskDetail,
+    *,
+    session: Session,
+    zip_extractor: ZipHashExtractor | None,
+    upload_dir: Path | None,
 ) -> tuple[str, bool | None, VerificationCost, float, list[str]]:
     warnings: list[str] = []
     if task.known_algorithm:
@@ -118,12 +139,71 @@ def _analyze_target(
             return algorithm, None, VerificationCost.UNKNOWN, 0.35, warnings
         return algorithm, _salt_for_algorithm(algorithm), _cost_for_algorithm(algorithm), 0.8, warnings
 
-    if task.target.type in {TargetType.ZIP, TargetType.PDF, TargetType.OFFICE}:
-        warnings.append("第一周仅基于文件元数据生成 PRIR，未解析加密结构")
+    if task.target.type == TargetType.ZIP:
+        return _analyze_zip(
+            task,
+            session=session,
+            zip_extractor=zip_extractor,
+            upload_dir=upload_dir,
+        )
+
+    if task.target.type in {TargetType.PDF, TargetType.OFFICE}:
+        warnings.append("该文件类型尚未接入真实解析，仅基于文件元数据生成 PRIR")
         return "unknown", None, VerificationCost.UNKNOWN, 0.45, warnings
 
     warnings.append("目标类型未知，无法确认算法")
     return "unknown", None, VerificationCost.UNKNOWN, 0.25, warnings
+
+
+def _analyze_zip(
+    task: TaskDetail,
+    *,
+    session: Session,
+    zip_extractor: ZipHashExtractor | None,
+    upload_dir: Path | None,
+) -> tuple[str, bool | None, VerificationCost, float, list[str]]:
+    warnings: list[str] = []
+    if zip_extractor is None or upload_dir is None:
+        warnings.append("ZIP 真实解析不可用（缺少 zip2john 配置或上传目录）")
+        return "unknown", None, VerificationCost.UNKNOWN, 0.45, warnings
+
+    if not task.target.file_id:
+        warnings.append("ZIP 目标缺少文件引用，无法解析加密结构")
+        return "unknown", None, VerificationCost.UNKNOWN, 0.45, warnings
+
+    file_item = FileRepository(session).get(task.target.file_id)
+    if file_item is None:
+        warnings.append("ZIP 目标文件记录不存在，无法解析加密结构")
+        return "unknown", None, VerificationCost.UNKNOWN, 0.45, warnings
+
+    archive = upload_dir / file_item.stored_name
+    if not archive.is_file():
+        warnings.append("ZIP 目标文件已丢失，无法解析加密结构")
+        return "unknown", None, VerificationCost.UNKNOWN, 0.45, warnings
+
+    try:
+        extracted = zip_extractor.extract(archive)
+    except AppError as exc:
+        if exc.status_code == 503:
+            warnings.append(
+                "未检测到 zip2john，ZIP 真实解析需要 John the Ripper 并配置 SAGE_ZIP2JOHN_PATH"
+            )
+        elif exc.status_code == 504:
+            warnings.append("zip2john 解析超时，未解析加密结构")
+        else:
+            warnings.append(exc.message or "未能解析该 ZIP 的加密结构")
+        return "unknown", None, VerificationCost.UNKNOWN, 0.45, warnings
+
+    if not extracted.hashes:
+        warnings.append("未从 ZIP 中提取到受支持的加密目标")
+        return "unknown", None, VerificationCost.UNKNOWN, 0.45, warnings
+    return (
+        ZIP_ALGORITHM,
+        True,
+        VerificationCost.MEDIUM,
+        0.85,
+        warnings,
+    )
 
 
 def _detect_hash_algorithm(content: str) -> str:

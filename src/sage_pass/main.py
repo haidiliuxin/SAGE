@@ -10,7 +10,9 @@ from fastapi.responses import JSONResponse
 from .config import Settings
 from .database import Database
 from .errors import AppError
+from .real_executor import RealExecutor
 from .routes import router
+from .zip_adapter import ZipHashExtractor
 
 
 def _error_payload(code: str, message: str, details: dict) -> dict:
@@ -25,15 +27,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(application: FastAPI):
         resolved.upload_dir.mkdir(parents=True, exist_ok=True)
         database.create_all()
+        application.state.zip_extractor = ZipHashExtractor(
+            resolved.zip2john_path
+        )
+        application.state.real_executor = RealExecutor(
+            session_factory=database.session_factory,
+            settings=resolved,
+            zip_extractor=application.state.zip_extractor,
+        )
         yield
+        application.state.real_executor.shutdown()
         database.dispose()
 
     application = FastAPI(
         title="SAGE-Pass API",
-        version="0.1.0",
+        version="0.2.0",
         description=(
-            "面向异构离线口令安全评测任务的编排 API。第一周仅提供系统骨架、"
-            "任务持久化与公共数据契约，不执行真实口令恢复。"
+            "面向异构离线口令安全评测任务的编排 API。支持 mock 与基于 "
+            "Hashcat 的真实执行（第二周），并接入 WinZip AES（$zip2$）"
+            "加密 ZIP 目标；LLM 规划、动态调度与持久化恢复属于后续周次。"
         ),
         lifespan=lifespan,
     )

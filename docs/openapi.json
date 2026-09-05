@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "SAGE-Pass API",
-    "description": "面向异构离线口令安全评测任务的编排 API。第一周仅提供系统骨架、任务持久化与公共数据契约，不执行真实口令恢复。",
-    "version": "0.1.0"
+    "description": "面向异构离线口令安全评测任务的编排 API。支持 mock 与基于 Hashcat 的真实执行（第二周），并接入 WinZip AES（$zip2$）加密 ZIP 目标；LLM 规划、动态调度与持久化恢复属于后续周次。",
+    "version": "0.2.0"
   },
   "paths": {
     "/api/files": {
@@ -719,6 +719,40 @@
           "mode": {
             "$ref": "#/components/schemas/ExecutionMode",
             "default": "mock"
+          },
+          "candidates": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 100000,
+            "title": "Candidates"
+          },
+          "hashcat_mode": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 99999.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hashcat Mode"
+          },
+          "timeout": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 86400.0,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timeout"
           }
         },
         "type": "object",
@@ -905,6 +939,24 @@
         ],
         "title": "PlannerType"
       },
+      "RecoveredItem": {
+        "properties": {
+          "target": {
+            "type": "string",
+            "title": "Target"
+          },
+          "plaintext": {
+            "type": "string",
+            "title": "Plaintext"
+          }
+        },
+        "type": "object",
+        "required": [
+          "target",
+          "plaintext"
+        ],
+        "title": "RecoveredItem"
+      },
       "RunResult": {
         "properties": {
           "task_id": {
@@ -944,6 +996,24 @@
             "type": "string",
             "format": "date-time",
             "title": "Finished At"
+          },
+          "recovered_items": {
+            "items": {
+              "$ref": "#/components/schemas/RecoveredItem"
+            },
+            "type": "array",
+            "title": "Recovered Items"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
           }
         },
         "type": "object",

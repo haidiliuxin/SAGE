@@ -126,9 +126,17 @@ def get_task(task_id: str, session: SessionDependency) -> TaskDetail:
     tags=["tasks"],
 )
 def patch_task_status(
-    task_id: str, payload: TaskStatusUpdate, session: SessionDependency
+    request: Request,
+    task_id: str,
+    payload: TaskStatusUpdate,
+    session: SessionDependency,
 ) -> TaskDetail:
     task = require_task(session, task_id)
+    if (
+        payload.status == TaskStatus.CANCELLED
+        and TaskStatus(task.status) == TaskStatus.RUNNING
+    ):
+        request.app.state.real_executor.cancel_task_runs(task_id)
     return task_to_schema(update_task_status(session, task, payload.status))
 
 
@@ -138,7 +146,9 @@ def patch_task_status(
     responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
     tags=["analyzer"],
 )
-def analyze_task(task_id: str, session: SessionDependency) -> PRIR:
+def analyze_task(
+    request: Request, task_id: str, session: SessionDependency
+) -> PRIR:
     task = require_task(session, task_id)
     current = TaskStatus(task.status)
     if current == TaskStatus.ANALYZED:
@@ -152,7 +162,12 @@ def analyze_task(task_id: str, session: SessionDependency) -> PRIR:
             status_code=409,
             details={"from": current.value, "to": TaskStatus.ANALYZED.value},
         )
-    prir = MockAnalyzer(session).analyze(task_to_schema(task))
+    settings = request.app.state.settings
+    prir = MockAnalyzer(
+        session,
+        zip_extractor=request.app.state.zip_extractor,
+        upload_dir=settings.upload_dir,
+    ).analyze(task_to_schema(task))
     update_task_status(session, task, TaskStatus.ANALYZED)
     return prir
 
@@ -194,15 +209,11 @@ def plan_task(task_id: str, session: SessionDependency) -> StrategyPlan:
     tags=["executor"],
 )
 def execute_task(
-    task_id: str, payload: ExecutionRequest, session: SessionDependency
+    request: Request,
+    task_id: str,
+    payload: ExecutionRequest,
+    session: SessionDependency,
 ) -> ExecutionStarted:
-    if payload.mode != ExecutionMode.MOCK:
-        raise AppError(
-            "EXECUTION_FAILED",
-            "第一周仅支持 mock 执行模式",
-            status_code=422,
-            details={"mode": payload.mode.value},
-        )
     task = require_task(session, task_id)
     current = TaskStatus(task.status)
     if current != TaskStatus.PLANNED:
@@ -221,7 +232,20 @@ def execute_task(
             details={"task_id": task_id},
         )
     plan = MockPlanner().plan(prir_to_schema(prir_model))
-    started = MockExecutor(session).start(task_to_schema(task), plan)
+    task_detail = task_to_schema(task)
+    if payload.mode == ExecutionMode.REAL:
+        started = request.app.state.real_executor.start(
+            session, task_detail, plan, payload
+        )
+    elif payload.mode == ExecutionMode.MOCK:
+        started = MockExecutor(session).start(task_detail, plan)
+    else:  # pragma: no cover - 枚举已穷尽
+        raise AppError(
+            "EXECUTION_FAILED",
+            "未知执行模式",
+            status_code=422,
+            details={"mode": payload.mode.value},
+        )
     update_task_status(session, task, TaskStatus.RUNNING)
     return started
 
@@ -232,7 +256,16 @@ def execute_task(
     responses={404: {"model": ErrorResponse}},
     tags=["executor"],
 )
-def get_run_status(run_id: str, session: SessionDependency) -> RunStatus:
+def get_run_status(
+    request: Request, run_id: str, session: SessionDependency
+) -> RunStatus:
+    real_executor = request.app.state.real_executor
+    if real_executor.has_run(run_id):
+        status_result = real_executor.status(run_id)
+        _sync_task_status_if_running(
+            session, status_result.task_id, status_result.status
+        )
+        return status_result
     status_result = MockExecutor(session).status(run_id)
     if status_result.status == TaskStatus.COMPLETED:
         task = require_task(session, status_result.task_id)
@@ -247,9 +280,31 @@ def get_run_status(run_id: str, session: SessionDependency) -> RunStatus:
     responses={404: {"model": ErrorResponse}},
     tags=["executor"],
 )
-def get_run_result(run_id: str, session: SessionDependency) -> RunResult:
+def get_run_result(
+    request: Request, run_id: str, session: SessionDependency
+) -> RunResult:
+    real_executor = request.app.state.real_executor
+    if real_executor.has_run(run_id):
+        result = real_executor.result(run_id)
+        _sync_task_status_if_running(session, result.task_id, result.status)
+        return result
     result = MockExecutor(session).result(run_id)
     task = require_task(session, result.task_id)
     if TaskStatus(task.status) == TaskStatus.RUNNING:
         update_task_status(session, task, TaskStatus.COMPLETED)
     return result
+
+
+def _sync_task_status_if_running(
+    session: Session, task_id: str, target: TaskStatus
+) -> None:
+    """真实 run 到达终态后，把任务状态同步到终态（与 mock 分支语义一致）。
+
+    后台工作线程也会回写任务状态，这里以请求线程的会话再同步一次，
+    避免极端时序下任务停留在 running。
+    """
+    if target == TaskStatus.RUNNING:
+        return
+    task = require_task(session, task_id)
+    if TaskStatus(task.status) == TaskStatus.RUNNING:
+        update_task_status(session, task, target)

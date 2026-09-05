@@ -1,9 +1,9 @@
-# SAGE-Pass 统一接口（第 1 周）
+# SAGE-Pass 统一接口（第 2 周）
 
-版本：`0.1.0`
+版本：`0.2.0`
 基础地址：`http://127.0.0.1:8000`
 
-本文把团队提供的《统一接口.docx》落实为当前后端契约。字段定义的机器可读版本见同目录 `openapi.json`；运行服务后也可在 `/docs` 联调。
+本文把团队提供的《统一接口.docx》落实为当前后端契约，并记录第 2 周新增的真实执行能力。字段定义的机器可读版本见同目录 `openapi.json`；运行服务后也可在 `/docs` 联调。
 
 ## 统一约定
 
@@ -13,10 +13,10 @@
 - 目标类型：`hash`、`zip`、`pdf`、`office`、`unknown`。
 - 验证成本：`low`、`medium`、`high`、`unknown`。
 - 策略编号：`S1`、`S2`、`S3`、`S4`、`S5`。
+- 执行模式：`mock`（第一周链路，保留）与 `real`（第 2 周真实执行）。
 - 无法确定的字段使用 `null` 或 `unknown`，不得编造。
-- 第 1 周执行模式只使用 `mock`；真实执行由后续版本接入。
 
-## 甲已实现的 HTTP API
+## 基础 HTTP API
 
 ### 健康检查
 
@@ -119,7 +119,7 @@
 `PATCH /api/tasks/{task_id}/status`
 
 ```json
-{"status": "analyzed"}
+{"status": "cancelled"}
 ```
 
 状态转换由后端约束：
@@ -131,11 +131,9 @@ planned  -> running  | failed | cancelled
 running  -> completed | failed | cancelled
 ```
 
-重复写入当前状态按幂等成功处理；终态不允许回退。
+重复写入当前状态按幂等成功处理；终态不允许回退。对正在 `running` 的真实执行取消，会同步停止底层 Hashcat 进程。
 
-## 乙已实现的 Mock 链路 API
-
-Pydantic 模型位于 `src/sage_pass/schemas.py`，Python Protocol 位于 `src/sage_pass/contracts.py`。当前版本按第一周统一接口提供 Mock 实现，不执行真实口令恢复。
+## Analyzer 与 Planner
 
 ### 分析任务并生成 PRIR
 
@@ -143,7 +141,7 @@ Pydantic 模型位于 `src/sage_pass/schemas.py`，Python Protocol 位于 `src/s
 
 要求任务当前状态为 `created`。成功后写入 `PRIRModel`，任务状态更新为 `analyzed`。重复分析已处于 `analyzed` 且已有 PRIR 的任务时，返回已有 PRIR。
 
-返回：
+Hash 任务返回示例：
 
 ```json
 {
@@ -162,19 +160,18 @@ Pydantic 模型位于 `src/sage_pass/schemas.py`，Python Protocol 位于 `src/s
 }
 ```
 
-说明：
+分析规则（第 2 周）：
 
-- Hash 文本任务会优先使用 `known_algorithm`；未提供时按常见 Hash 形态做规则识别；
-- 文件任务支持 `zip`、`pdf`、`office` 的元数据级 PRIR，第一周不解析真实加密结构；
-- 无法确认的字段使用 `unknown` 或 `null`。
+- Hash 文本任务优先使用 `known_algorithm`；未提供时按常见 Hash 形态做规则识别；
+- **ZIP 文件任务**（第 2 周接入）：调用 zip2john 提取加密目标，识别成功时返回 `algorithm: "zip-aes"`、`salt: true`、`verification_cost: "medium"`；
+- zip2john 未安装/超时/仅传统 PKZIP 时**不失败**，返回 `unknown` 算法并在 `warnings` 中说明降级原因，mock 链路仍可继续；
+- `pdf`、`office` 仍为元数据级 PRIR，尚未接入真实解析。
 
 ### 生成策略计划
 
 `POST /api/tasks/{task_id}/plan`
 
 要求任务当前状态为 `analyzed` 或 `planned`，且已有 PRIR。成功后返回 `StrategyPlan`；若任务从 `analyzed` 进入规划，状态更新为 `planned`。
-
-返回：
 
 ```json
 {
@@ -190,18 +187,6 @@ Pydantic 模型位于 `src/sage_pass/schemas.py`，Python Protocol 位于 `src/s
       "candidate_budget": 20000,
       "reason": "优先测试高频口令",
       "parameters": {}
-    },
-    {
-      "strategy_id": "S4",
-      "strategy_name": "Context",
-      "priority": 2,
-      "time_budget": 120,
-      "candidate_budget": 40000,
-      "reason": "任务提供了上下文信息",
-      "parameters": {
-        "use_years": true,
-        "use_keywords": true
-      }
     }
   ],
   "status": "planned",
@@ -209,19 +194,38 @@ Pydantic 模型位于 `src/sage_pass/schemas.py`，Python Protocol 位于 `src/s
 }
 ```
 
-当前 Mock Planner 固定生成 `S1`；如果 PRIR 表明有上下文且时间、候选预算均足以为两个策略至少分配 1 个单位，则追加 `S4`，否则只返回 `S1` 并在 `warnings` 中说明。策略时间预算之和由 `StrategyPlan` 校验，不允许超过任务总时间预算。
+当前 Mock Planner 固定生成 `S1`；如果 PRIR 表明有上下文且预算足够，则追加 `S4`。策略时间预算之和由 `StrategyPlan` 校验，不允许超过任务总时间预算。
 
-### 启动模拟执行
+## 执行
+
+### 启动执行
 
 `POST /api/tasks/{task_id}/execute`
 
-请求：
+要求任务当前状态为 `planned`，且已有 PRIR。支持两种模式：
+
+Mock（第一周链路，无需候选）：
 
 ```json
 {"mode": "mock"}
 ```
 
-要求任务当前状态为 `planned`，且已有 PRIR。第一周只接受 `mock` 模式。成功后写入一条或多条 `StrategyRunModel`，任务状态更新为 `running`。
+真实执行（第 2 周，Hashcat）：
+
+```json
+{
+  "mode": "real",
+  "candidates": ["123456", "password", "passw0rd"],
+  "hashcat_mode": 0,
+  "timeout": 60
+}
+```
+
+字段说明：
+
+- `candidates`：真实执行候选集，最多 100000 条，每条为 1～1024 字符的单行文本，**不能为空列表**；
+- `hashcat_mode`：可选。缺省时 Hash 任务由 `known_algorithm` 自动映射（bcrypt=3200、sha256=1400、zip-aes=13600 等），ZIP 任务默认 13600；无法确定时返回 `422`；
+- `timeout`：可选，覆盖策略时间预算的每策略秒数上限。
 
 返回：
 
@@ -234,11 +238,11 @@ Pydantic 模型位于 `src/sage_pass/schemas.py`，Python Protocol 位于 `src/s
 }
 ```
 
+真实执行按计划逐策略运行：每个策略按候选预算顺序分得候选子集，并带有各自的时间预算；任何情况下 Hashcat 进程都不会超过时间或候选预算上限（到时自动停止）。候选写入临时词表，任务结束后清理。
+
 ### 查询执行状态
 
 `GET /api/runs/{run_id}/status`
-
-返回：
 
 ```json
 {
@@ -250,17 +254,17 @@ Pydantic 模型位于 `src/sage_pass/schemas.py`，Python Protocol 位于 `src/s
   "elapsed_time": 1.2,
   "tested": 36000,
   "recovered": 0,
-  "message": "正在执行上下文策略"
+  "message": "正在执行策略 Context（S4）"
 }
 ```
 
-Mock 执行根据策略计划中的候选总量和模拟吞吐率动态推进；任务处于 `running` 时可以取消。完成后返回 `completed`，并把任务状态从 `running` 推进到 `completed`。
+Mock 与真实执行共用该接口。真实执行进行中可轮询进度；时间预算用尽或候选耗尽后自动进入终态。
 
 ### 查询最终结果
 
 `GET /api/runs/{run_id}/result`
 
-返回：
+真实执行尚未结束时返回 `409 RUN_IN_PROGRESS`；结束后返回：
 
 ```json
 {
@@ -269,7 +273,7 @@ Mock 执行根据策略计划中的候选总量和模拟吞吐率动态推进；
   "status": "completed",
   "total_time": 12.0,
   "total_tested": 60000,
-  "total_recovered": 3,
+  "total_recovered": 2,
   "strategy_results": [
     {
       "strategy_id": "S1",
@@ -282,15 +286,31 @@ Mock 执行根据策略计划中的候选总量和模拟吞吐率动态推进；
       "strategy_id": "S4",
       "time": 8.0,
       "tested": 40000,
-      "recovered": 2,
-      "success_rate": 0.00005
+      "recovered": 1,
+      "success_rate": 0.000025
     }
   ],
-  "finished_at": "2026-09-01T22:05:02+08:00"
+  "finished_at": "2026-09-01T22:05:02+08:00",
+  "recovered_items": [
+    {
+      "target": "$2b$12$...",
+      "plaintext": "password"
+    }
+  ],
+  "message": "真实执行已完成"
 }
 ```
 
-调用结果接口会补全 Mock 执行结果；如果任务仍为 `running`，会推进到 `completed`。
+`recovered_items` 为去重后的真实恢复结果；`target` 是 Hash 文本或 `$zip2$` 密文行，`plaintext` 是恢复的口令。Mock 结果的这两个字段保持兼容（空列表 / `null`）。
+
+## 环境变量（真实执行）
+
+| 变量 | 说明 | 默认 |
+| --- | --- | --- |
+| `SAGE_HASHCAT_PATH` | hashcat 可执行文件路径或命令名 | `hashcat` |
+| `SAGE_ZIP2JOHN_PATH` | zip2john 可执行文件路径或命令名 | `zip2john` |
+
+未安装 hashcat 时，`mode: "real"` 的 Hash 任务在启动时返回 `503 EXECUTION_FAILED`（错误信息提示检查 `SAGE_HASHCAT_PATH`）；未安装 zip2john 时，ZIP 分析会降级并给出提示，ZIP 真实执行同样返回 `503`。
 
 ## 统一错误响应
 
@@ -306,4 +326,4 @@ Mock 执行根据策略计划中的候选总量和模拟吞吐率动态推进；
 }
 ```
 
-当前使用的代码：`INVALID_TASK`、`TASK_NOT_FOUND`、`ANALYZE_FAILED`、`PLAN_FAILED`、`EXECUTION_FAILED`、`INTERNAL_ERROR`。已在公共契约中为后续模块保留 `BUDGET_EXCEEDED` 的格式约定。
+当前使用的代码：`INVALID_TASK`、`TASK_NOT_FOUND`、`ANALYZE_FAILED`、`PLAN_FAILED`、`EXECUTION_FAILED`、`RUN_IN_PROGRESS`、`INTERNAL_ERROR`。已在公共契约中为后续模块保留 `BUDGET_EXCEEDED` 的格式约定。

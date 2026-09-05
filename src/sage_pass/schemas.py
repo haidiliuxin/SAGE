@@ -120,6 +120,16 @@ class StrategyPlan(BaseModel):
 
 class ExecutionRequest(BaseModel):
     mode: ExecutionMode = ExecutionMode.MOCK
+    candidates: list[str] = Field(default_factory=list, max_length=100_000)
+    hashcat_mode: int | None = Field(default=None, ge=0, le=99_999)
+    timeout: int | None = Field(default=None, gt=0, le=86_400)
+
+    @model_validator(mode="after")
+    def validate_candidates(self) -> "ExecutionRequest":
+        for index, candidate in enumerate(self.candidates):
+            if not candidate or len(candidate) > 1024 or "\n" in candidate or "\r" in candidate:
+                raise ValueError(f"candidates[{index}] 必须为 1～1024 个字符的单行文本")
+        return self
 
 
 class ExecutionStarted(BaseModel):
@@ -149,6 +159,11 @@ class StrategyResult(BaseModel):
     success_rate: float = Field(ge=0.0)
 
 
+class RecoveredItem(BaseModel):
+    target: str
+    plaintext: str
+
+
 class RunResult(BaseModel):
     task_id: str
     run_id: str
@@ -158,6 +173,8 @@ class RunResult(BaseModel):
     total_recovered: int = Field(ge=0)
     strategy_results: list[StrategyResult]
     finished_at: datetime
+    recovered_items: list[RecoveredItem] = Field(default_factory=list)
+    message: str | None = None
 
 
 class FileCreated(BaseModel):
