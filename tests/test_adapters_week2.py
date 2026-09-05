@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 
@@ -15,6 +16,7 @@ from sage_pass.hashcat_adapter import (
     HashcatAdapter,
     HashcatJob,
     RecoveredCredential,
+    _executable_dir,
     resolve_hashcat_mode,
 )
 from sage_pass.zip_adapter import ZipHashExtractor
@@ -62,6 +64,16 @@ def test_resolve_hashcat_mode_rejects_unknown_algorithm():
         resolve_hashcat_mode("scrypt-custom")
     assert excinfo.value.status_code == 422
     assert excinfo.value.code == "EXECUTION_FAILED"
+
+
+def test_executable_dir_resolves_real_binary_path():
+    # 完整路径（真实存在）→ 返回所在目录；hashcat 内核目录按 cwd 解析。
+    assert _executable_dir((sys.executable,)) == os.path.dirname(sys.executable)
+    # 纯命令名 / 空 → None（保持临时目录作为 cwd）。
+    assert _executable_dir(("hashcat",)) is None
+    assert _executable_dir(()) is None
+    # 带路径但不存在 → None。
+    assert _executable_dir((r"C:\definitely\missing\hashcat.exe",)) is None
 
 
 # ------------------------------------------------------------ Hashcat 适配器
