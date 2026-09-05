@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import subprocess
 import tempfile
@@ -129,9 +130,12 @@ class HashcatHandle:
             str(self._wordlist_path),
         ]
         try:
+            # hashcat 的 OpenCL 内核目录按进程工作目录解析（./OpenCL/），
+            # 因此当命令指向真实可执行文件时，须以其所在目录作为 cwd。
+            run_cwd = _executable_dir(command) or working_dir
             self._process = subprocess.Popen(
                 args,
-                cwd=working_dir,
+                cwd=run_cwd,
                 stdin=subprocess.DEVNULL,
                 stdout=self._stdout_file,
                 stderr=self._stderr_file,
@@ -269,6 +273,28 @@ class HashcatAdapter:
                 details={},
             )
         return HashcatHandle(self.command, job)
+
+
+def _executable_dir(command: Sequence[str]) -> str | None:
+    """若命令首项是真实文件的路径，返回其所在目录。
+
+    hashcat 的 OpenCL 内核目录（./OpenCL/）按进程工作目录解析，因此
+    通过完整路径调用 hashcat 时必须以其安装目录作为进程 cwd。
+    """
+    if not command:
+        return None
+    executable = command[0]
+    if not isinstance(executable, str) or not executable:
+        return None
+    has_separator = os.path.sep in executable or (
+            os.path.altsep is not None and os.path.altsep in executable
+    )
+    if not has_separator:
+        return None
+    resolved = os.path.abspath(executable)
+    if not os.path.isfile(resolved):
+        return None
+    return os.path.dirname(resolved)
 
 
 def _validated_lines(values: Sequence[str], field: str) -> tuple[str, ...]:

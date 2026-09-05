@@ -58,5 +58,5 @@ SAGE_ZIP2JOHN_PATH=zip2john    # 或完整路径
 - 真实运行的运行态保存在进程内存中；进程重启后未完成 run 无法恢复（第三周“任务状态持久化和异常恢复”处理）。
 - ZIP 仅支持 WinZip AES（`$zip2$`，hashcat 13600）；传统 PKZIP（`$pkzip2$`）给出明确错误，PDF/Office 尚未接入真实解析。
 - 候选生成（S1～S4 规则、PCFG、上下文词组合）、LLM 规划与动态调度由乙/丙在后续接入，本次未越界实现。
-- 真实工具仅做了 CLI 契约对齐与仿真测试；部署机器请用真实 hashcat/zip2john 各跑一次冒烟（授权测试集）。
+- 真实工具冒烟已在开发机完成：hashcat 7.1.2 与 John the Ripper 1.9.0-jumbo-1（zip2john）解压于 `F:\SA\tools`；后端 `real` 链路真实恢复 MD5（明文 `P@ssw0rd!2026`）与 WinZip-AES ZIP（密码 `SagePass2026`，并用恢复密码成功解包）。hashcat 需以其安装目录作为进程 cwd（OpenCL 内核目录按 cwd 解析），适配器已自动处理（见 `hashcat_adapter.py::_executable_dir`）。
 - 本系统仅用于获得授权的离线安全评测。
