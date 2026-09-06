@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from .candidate_generator import CandidateGenerator
 from .config import Settings
 from .enums import ExecutionMode, TargetType, TaskStatus
 from .errors import AppError
@@ -44,7 +45,7 @@ class _StrategyState:
     time_budget: int
     candidate_budget: int
     parameters: dict[str, Any]
-    candidates: tuple[str, ...] = ()
+    candidate_batches: tuple[tuple[str, ...], ...] = ()
     status: str = TaskStatus.RUNNING.value
     started_at: str | None = None
     finished_at: str | None = None
@@ -79,8 +80,8 @@ class _RunState:
 class RealExecutor:
     """基于 Hashcat 的真实执行器。
 
-    以计划中的每个策略为一次独立的 Hashcat 任务（带各自的候选切片与时间
-    预算），后台线程依次启动/轮询/回收；对外通过 run registry 提供
+    后端按计划生成候选批次，并在每个策略的共享时间预算内依次交给 Hashcat
+    执行；后台线程负责启动/轮询/回收，对外通过 run registry 提供
     status/result，并向数据库回写策略运行行与任务终态。运行状态保存在进程
     内存中（第二周范围），持久化与异常恢复属于第三周任务。
     """
@@ -92,6 +93,7 @@ class RealExecutor:
         settings: Settings,
         hashcat: HashcatAdapter | None = None,
         zip_extractor: ZipHashExtractor | None = None,
+        candidate_generator: CandidateGenerator | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.settings = settings
@@ -99,6 +101,7 @@ class RealExecutor:
         self.zip_extractor = zip_extractor or ZipHashExtractor(
             settings.zip2john_path
         )
+        self.candidate_generator = candidate_generator or CandidateGenerator()
         self._registry: dict[str, _RunState] = {}
         self._task_runs: dict[str, set[str]] = {}
         self._lock = threading.RLock()
@@ -215,26 +218,34 @@ class RealExecutor:
                 status_code=422,
                 details={"task_id": task.task_id},
             )
-        if not payload.candidates:
-            raise AppError(
-                "EXECUTION_FAILED",
-                "真实执行候选集为空，请先提供 candidates",
-                status_code=422,
-                details={"task_id": task.task_id},
-            )
         targets, hash_mode = self._resolve_targets(
             session, task, payload.hashcat_mode
         )
         started_at = now_iso()
         run_id = public_id("R")
-        pool = list(payload.candidates)
+        batches_by_strategy: dict[str, list[tuple[str, ...]]] = {}
+        try:
+            for batch in self.candidate_generator.iter_plan_batches(
+                plan,
+                supplied_candidates=payload.candidates,
+            ):
+                batches_by_strategy.setdefault(
+                    batch.strategy_id.value, []
+                ).append(batch.candidates)
+        except ValueError as exc:
+            raise AppError(
+                "EXECUTION_FAILED",
+                "生成真实执行候选失败",
+                status_code=422,
+                details={"task_id": task.task_id, "reason": str(exc)},
+            ) from exc
         strategies: list[_StrategyState] = []
         expected = 0
         for item in plan.strategies:
-            take = min(max(item.candidate_budget, 0), len(pool))
-            slice_candidates = tuple(pool[:take])
-            pool = pool[take:]
-            expected += len(slice_candidates)
+            candidate_batches = tuple(
+                batches_by_strategy.get(item.strategy_id.value, ())
+            )
+            expected += sum(len(batch) for batch in candidate_batches)
             strategies.append(
                 _StrategyState(
                     strategy_id=item.strategy_id.value,
@@ -243,14 +254,13 @@ class RealExecutor:
                     time_budget=item.time_budget,
                     candidate_budget=item.candidate_budget,
                     parameters=item.parameters,
-                    candidates=slice_candidates,
-                    started_at=started_at,
+                    candidate_batches=candidate_batches,
                 )
             )
         if expected == 0:
             raise AppError(
                 "EXECUTION_FAILED",
-                "候选分配结果为空，无法启动真实执行",
+                "后端未能为策略计划生成候选，无法启动真实执行",
                 status_code=422,
                 details={"task_id": task.task_id},
             )
@@ -398,54 +408,80 @@ class RealExecutor:
             if state.cancel_requested:
                 self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
                 return
-            if not item.candidates:
+            if not item.candidate_batches:
+                item.started_at = now_iso()
                 item.status = TaskStatus.COMPLETED.value
                 item.tested = 0
                 item.finished_at = now_iso()
-                item.message = "该策略未分配到候选，无需执行"
+                item.message = "该策略未生成候选，无需执行"
                 continue
-            try:
-                handle = self.hashcat.start(
-                    HashcatJob(
-                        run_id=f"{state.run_id}-{item.strategy_id}",
-                        target_hashes=state.targets,
-                        hash_mode=state.hash_mode,
-                        candidates=item.candidates,
-                        timeout_seconds=self._strategy_runtime(state, item),
-                        candidate_budget=len(item.candidates),
-                    )
-                )
-            except AppError as exc:
-                item.status = TaskStatus.FAILED.value
-                item.finished_at = now_iso()
-                item.message = exc.message
-                state.failed_launch = exc.message
-                return
-            item.handle = handle
             item.started_at = now_iso()
-            with self._lock:
-                cancel_requested = state.cancel_requested
-            if cancel_requested:
-                # 启动与取消几乎同时发生时，立即停止刚启动的进程。
-                result = handle.stop()
-                item.handle = None
-                self._apply_result(item, result)
-                self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
-                return
-            try:
-                result = handle.wait()
-            except Exception as exc:  # pragma: no cover - wait 失败按执行失败处理
-                item.status = TaskStatus.FAILED.value
-                item.finished_at = now_iso()
-                item.message = f"等待 Hashcat 失败：{exc}"
-                state.failed_launch = item.message
-                return
-            finally:
-                item.handle = None
-            self._apply_result(item, result)
-            if state.cancel_requested:
-                self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
-                return
+            deadline = time.monotonic() + self._strategy_runtime(state, item)
+            for batch_index, candidates in enumerate(
+                item.candidate_batches, start=1
+            ):
+                if state.cancel_requested:
+                    self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
+                    return
+                remaining_time = deadline - time.monotonic()
+                if remaining_time <= 0:
+                    item.message = "已达到策略时间预算"
+                    break
+                try:
+                    handle = self.hashcat.start(
+                        HashcatJob(
+                            run_id=(
+                                f"{state.run_id}-{item.strategy_id}-{batch_index}"
+                            ),
+                            target_hashes=state.targets,
+                            hash_mode=state.hash_mode,
+                            candidates=candidates,
+                            timeout_seconds=remaining_time,
+                            candidate_budget=len(candidates),
+                        )
+                    )
+                except AppError as exc:
+                    item.status = TaskStatus.FAILED.value
+                    item.finished_at = now_iso()
+                    item.message = exc.message
+                    state.failed_launch = exc.message
+                    return
+                item.handle = handle
+                with self._lock:
+                    cancel_requested = state.cancel_requested
+                if cancel_requested:
+                    # 启动与取消几乎同时发生时，立即停止刚启动的进程。
+                    result = handle.stop()
+                    item.handle = None
+                    self._accumulate_result(item, result)
+                    self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
+                    return
+                try:
+                    result = handle.wait()
+                except Exception as exc:  # pragma: no cover - wait 失败按执行失败处理
+                    item.status = TaskStatus.FAILED.value
+                    item.finished_at = now_iso()
+                    item.message = f"等待 Hashcat 失败：{exc}"
+                    state.failed_launch = item.message
+                    return
+                finally:
+                    item.handle = None
+                self._accumulate_result(item, result)
+                if result.status == TaskStatus.FAILED:
+                    item.status = TaskStatus.FAILED.value
+                    item.finished_at = now_iso()
+                    state.failed_launch = result.message
+                    return
+                if state.cancel_requested:
+                    self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
+                    return
+            item.status = TaskStatus.COMPLETED.value
+            item.finished_at = now_iso()
+            if "时间预算" not in item.message:
+                item.message = (
+                    f"策略执行完成，共测试 {item.tested} 个候选，"
+                    f"恢复 {item.recovered} 项"
+                )
         if state.failed_launch is None:
             state.failed_launch = ""
 
@@ -459,12 +495,21 @@ class RealExecutor:
             item.finished_at = now_iso()
             item.message = message
 
-    def _apply_result(self, item: _StrategyState, result: HashcatResult) -> None:
-        item.status = result.status.value
-        item.tested = result.tested
-        item.recovered = len(result.recovered)
-        item.recovered_items = list(result.recovered)
-        item.finished_at = now_iso()
+    def _accumulate_result(
+        self, item: _StrategyState, result: HashcatResult
+    ) -> None:
+        item.tested += result.tested
+        recovered_seen = {
+            (credential.target, credential.plaintext)
+            for credential in item.recovered_items
+        }
+        for credential in result.recovered:
+            key = (credential.target, credential.plaintext)
+            if key in recovered_seen:
+                continue
+            recovered_seen.add(key)
+            item.recovered_items.append(credential)
+        item.recovered = len(item.recovered_items)
         item.exit_code = result.exit_code
         item.message = result.message
 

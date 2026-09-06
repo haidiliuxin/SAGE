@@ -13,6 +13,7 @@ import time
 import pytest
 
 from sage_pass.hashcat_adapter import HashcatAdapter
+from sage_pass.planner import RulePlanner
 from sage_pass.zip_adapter import ZipHashExtractor
 
 from sim_binaries import write_sim_scripts
@@ -55,11 +56,12 @@ def _create_hash_task(
     return created.json()["task_id"]
 
 
-def _analyze_plan(client, task_id: str) -> None:
+def _analyze_plan(client, task_id: str) -> dict:
     analyzed = client.post(f"/api/tasks/{task_id}/analyze")
     assert analyzed.status_code == 200, analyzed.text
     planned = client.post(f"/api/tasks/{task_id}/plan")
     assert planned.status_code == 200, planned.text
+    return planned.json()
 
 
 def _wait_terminal(client, run_id: str, timeout: float = 10.0) -> dict:
@@ -75,10 +77,15 @@ def _wait_terminal(client, run_id: str, timeout: float = 10.0) -> dict:
     pytest.fail(f"run {run_id} 未在 {timeout}s 内结束：{last}")
 
 
-def _finish_real(client, task_id: str, candidates: list[str]) -> dict:
+def _finish_real(
+    client, task_id: str, candidates: list[str] | None = None
+) -> dict:
+    payload = {"mode": "real"}
+    if candidates is not None:
+        payload["candidates"] = candidates
     started = client.post(
         f"/api/tasks/{task_id}/execute",
-        json={"mode": "real", "candidates": candidates},
+        json=payload,
     )
     assert started.status_code == 200, started.text
     run_id = started.json()["run_id"]
@@ -88,31 +95,42 @@ def _finish_real(client, task_id: str, candidates: list[str]) -> dict:
     return result.json()
 
 
-def test_real_execution_hash_recovers_per_strategy(
+def test_real_execution_generates_s1_s2_and_reports_per_strategy_statistics(
     client, tmp_path, monkeypatch
 ):
     _install_fakes(client, tmp_path, monkeypatch)
+    client.app.state.planner = RulePlanner()
     task_id = _create_hash_task(
         client,
         time_budget=30,
-        candidate_budget=50,
-        context={"keywords": ["张三"], "years": [2024]},
+        candidate_budget=20,
     )
-    _analyze_plan(client, task_id)
-    candidates = [f"cand-{index:02d}" for index in range(30)]
+    planned = _analyze_plan(client, task_id)
 
-    result = _finish_real(client, task_id, candidates)
+    result = _finish_real(client, task_id)
 
     assert result["status"] == "completed"
-    assert result["total_tested"] == 30
     assert [item["strategy_id"] for item in result["strategy_results"]] == [
         "S1",
-        "S4",
+        "S2",
+        "S3",
     ]
-    # S1 使用前 10 个候选，S4 使用其后 20 个，各自恢复切片内第一个候选。
+    planned_budgets = {
+        item["strategy_id"]: item["candidate_budget"]
+        for item in planned["strategies"]
+    }
+    statistics = {
+        item["strategy_id"]: item for item in result["strategy_results"]
+    }
+    assert statistics["S1"]["tested"] == planned_budgets["S1"]
+    assert statistics["S2"]["tested"] == planned_budgets["S2"]
+    assert statistics["S3"]["tested"] == 0
+    assert result["total_tested"] == (
+        statistics["S1"]["tested"] + statistics["S2"]["tested"]
+    )
     assert result["total_recovered"] == 2
     plaintexts = {item["plaintext"] for item in result["recovered_items"]}
-    assert plaintexts == {"cand-00", "cand-10"}
+    assert plaintexts == {"123456", "1234561"}
     for item in result["recovered_items"]:
         assert item["target"] == MD5_HEX
     # 任务被标记为完成。
@@ -221,20 +239,23 @@ def test_real_execution_can_be_cancelled(client, tmp_path, monkeypatch):
     assert client.get(f"/api/tasks/{task_id}").json()["status"] == "cancelled"
 
 
-def test_real_execution_requires_planned_task_and_candidates(
+def test_real_execution_generates_candidates_but_still_requires_planned_task(
     client, tmp_path, monkeypatch
 ):
     _install_fakes(client, tmp_path, monkeypatch)
     task_id = _create_hash_task(client)
     _analyze_plan(client, task_id)
 
-    empty = client.post(
+    started = client.post(
         f"/api/tasks/{task_id}/execute",
         json={"mode": "real", "candidates": []},
     )
-    assert empty.status_code == 422
-    assert empty.json()["error"]["message"] == "真实执行候选集为空，请先提供 candidates"
-    assert client.get(f"/api/tasks/{task_id}").json()["status"] == "planned"
+    assert started.status_code == 200, started.text
+    run_id = started.json()["run_id"]
+    _wait_terminal(client, run_id)
+    result = client.get(f"/api/runs/{run_id}/result")
+    assert result.status_code == 200, result.text
+    assert result.json()["total_tested"] > 0
 
     unplanned_task = _create_hash_task(client)
     not_planned = client.post(
