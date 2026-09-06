@@ -97,13 +97,13 @@ def _save_prir(session: Session, prir: PRIR) -> PRIRModel:
 
 
 def _has_context(context: TaskContext) -> bool:
+    """Return whether S4 has structured fields it can turn into candidates."""
     return any(
         [
             context.keywords,
             context.years,
             context.region,
             context.organization,
-            context.description,
         ]
     )
 

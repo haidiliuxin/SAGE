@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from sage_pass.analyzer import _has_context
 from sage_pass.context import abbreviate, iter_context_candidates, normalize_keyword, to_pinyin
 from sage_pass.enums import StrategyId
 from sage_pass.schemas import TaskContext
@@ -52,3 +53,7 @@ def test_context_limit_and_source_switches():
     ))
     assert [item.value for item in records] == ["alpha", "2024"]
 
+
+def test_description_alone_does_not_enable_s4_context():
+    assert not _has_context(TaskContext(description="仅用于任务备注"))
+    assert _has_context(TaskContext(keywords=["南开"]))

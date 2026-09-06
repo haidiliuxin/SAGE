@@ -1,3 +1,5 @@
+import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -5,6 +7,26 @@ from fastapi.testclient import TestClient
 
 from sage_pass.config import Settings
 from sage_pass.main import create_app
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Give each pytest process an isolated, caller-owned temp directory.
+
+    A fixed directory is unsafe when tests alternate between a sandboxed agent
+    and an interactive Windows account: the creator's ACL can deny the other
+    process. A PID-specific sibling of the repository avoids both that collision
+    and pytest's inaccessible per-user temp root.
+    """
+    if config.option.basetemp is None:
+        config.option.basetemp = str(
+            config.rootpath / f".pytest-tmp-{os.getpid()}"
+        )
+
+
+def pytest_sessionfinish(session: pytest.Session) -> None:
+    base_temp = session.config.option.basetemp
+    if base_temp:
+        shutil.rmtree(Path(base_temp), ignore_errors=True)
 
 
 @pytest.fixture

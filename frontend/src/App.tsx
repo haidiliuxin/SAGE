@@ -522,7 +522,7 @@ function App() {
                   <label><span>地区 <em>可选</em></span><input value={form.context.region} onChange={(e) => updateContext('region', e.target.value)} placeholder="例如：北京" /></label>
                   <label><span>组织 <em>可选</em></span><input value={form.context.organization} onChange={(e) => updateContext('organization', e.target.value)} placeholder="例如：学校、公司或实验室" /></label>
                 </div>
-                <label className="wide"><span>补充说明 <em>可选</em></span><textarea rows={3} value={form.context.description} onChange={(e) => updateContext('description', e.target.value)} placeholder="填写其他有助于生成候选的信息；不确定时请留空" /></label>
+                <label className="wide"><span>补充说明 <em>可选</em></span><textarea rows={3} value={form.context.description} onChange={(e) => updateContext('description', e.target.value)} placeholder="仅作为任务备注，不参与候选生成；不确定时请留空" /></label>
               </div>
 
               <div className="form-footer">
