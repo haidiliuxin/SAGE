@@ -8,7 +8,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from .candidate_generator import CandidateGenerator
+from .candidate_generator import CandidateBatch, CandidateGenerator
+from .candidate_types import CandidateRecord
 from .config import Settings
 from .enums import ExecutionMode, TargetType, TaskStatus
 from .errors import AppError
@@ -46,6 +47,7 @@ class _StrategyState:
     candidate_budget: int
     parameters: dict[str, Any]
     candidate_batches: tuple[tuple[str, ...], ...] = ()
+    candidate_record_batches: tuple[tuple[CandidateRecord, ...], ...] = ()
     status: str = TaskStatus.RUNNING.value
     started_at: str | None = None
     finished_at: str | None = None
@@ -223,15 +225,16 @@ class RealExecutor:
         )
         started_at = now_iso()
         run_id = public_id("R")
-        batches_by_strategy: dict[str, list[tuple[str, ...]]] = {}
+        batches_by_strategy: dict[str, list[CandidateBatch]] = {}
         try:
             for batch in self.candidate_generator.iter_plan_batches(
                 plan,
                 supplied_candidates=payload.candidates,
+                task_context=task.context,
             ):
                 batches_by_strategy.setdefault(
                     batch.strategy_id.value, []
-                ).append(batch.candidates)
+                ).append(batch)
         except ValueError as exc:
             raise AppError(
                 "EXECUTION_FAILED",
@@ -242,8 +245,12 @@ class RealExecutor:
         strategies: list[_StrategyState] = []
         expected = 0
         for item in plan.strategies:
-            candidate_batches = tuple(
+            generated_batches = tuple(
                 batches_by_strategy.get(item.strategy_id.value, ())
+            )
+            candidate_batches = tuple(batch.candidates for batch in generated_batches)
+            candidate_record_batches = tuple(
+                batch.records for batch in generated_batches
             )
             expected += sum(len(batch) for batch in candidate_batches)
             strategies.append(
@@ -255,6 +262,7 @@ class RealExecutor:
                     candidate_budget=item.candidate_budget,
                     parameters=item.parameters,
                     candidate_batches=candidate_batches,
+                    candidate_record_batches=candidate_record_batches,
                 )
             )
         if expected == 0:

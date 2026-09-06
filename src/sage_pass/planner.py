@@ -667,5 +667,16 @@ def _context_strategy(
             max_candidate_budget, max(1, (prir.candidate_budget * 2) // 5)
         ),
         reason="任务提供了上下文信息",
-        parameters={"use_years": True, "use_keywords": True},
+        parameters={
+            "use_keywords": True,
+            "use_pinyin": True,
+            "use_abbreviations": True,
+            "use_years": True,
+            "use_region": True,
+            "use_organization": True,
+            "max_combinations": min(
+                max_candidate_budget,
+                max(1, (prir.candidate_budget * 2) // 5),
+            ),
+        },
     )

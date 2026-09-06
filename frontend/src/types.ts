@@ -9,6 +9,7 @@ export type TaskStatus =
 
 export type TargetType = 'hash' | 'zip' | 'pdf' | 'office' | 'unknown'
 export type PlannerType = 'mock' | 'rule' | 'llm' | 'adaptive'
+export type ExecutionMode = 'mock' | 'real'
 export type StrategyId = 'S1' | 'S2' | 'S3' | 'S4' | 'S5'
 
 export interface TaskInput {
