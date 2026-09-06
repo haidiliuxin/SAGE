@@ -41,6 +41,11 @@ class PlannerType(StrEnum):
     ADAPTIVE = "adaptive"
 
 
+class LLMApiStyle(StrEnum):
+    RESPONSES = "responses"
+    CHAT_COMPLETIONS = "chat_completions"
+
+
 class ExecutionMode(StrEnum):
     MOCK = "mock"
     REAL = "real"

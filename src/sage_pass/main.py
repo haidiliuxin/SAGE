@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from .config import Settings
 from .database import Database
 from .errors import AppError
+from .planner import build_planner
 from .real_executor import RealExecutor
 from .routes import router
 from .zip_adapter import ZipHashExtractor
@@ -35,6 +36,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             settings=resolved,
             zip_extractor=application.state.zip_extractor,
         )
+        application.state.planner = build_planner(resolved)
         yield
         application.state.real_executor.shutdown()
         database.dispose()
@@ -45,7 +47,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         description=(
             "面向异构离线口令安全评测任务的编排 API。支持 mock 与基于 "
             "Hashcat 的真实执行（第二周），并接入 WinZip AES（$zip2$）"
-            "加密 ZIP 目标；LLM 规划、动态调度与持久化恢复属于后续周次。"
+            "加密 ZIP 目标，并支持可配置的 LLM 策略规划。"
         ),
         lifespan=lifespan,
     )

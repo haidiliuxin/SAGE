@@ -196,6 +196,12 @@ Hash 任务返回示例：
 
 当前 Mock Planner 固定生成 `S1`；如果 PRIR 表明有上下文且预算足够，则追加 `S4`。策略时间预算之和由 `StrategyPlan` 校验，不允许超过任务总时间预算。
 
+设置 `SAGE_PLANNER_TYPE=llm` 并提供 `OPENAI_API_KEY` 后，接口改用 LLM Planner，返回的 `planner_type` 为 `llm`。模型只接收上述结构化 PRIR（不含目标 Hash、文件内容或上下文原文），并通过严格 JSON Schema 在 `S1`～`S4` 中选择策略和分配预算。`SAGE_LLM_API_STYLE=responses` 使用 OpenAI Responses API；`chat_completions` 使用 OpenAI 兼容的 Chat Completions API。硅基流动需同时设置 `OPENAI_BASE_URL=https://api.siliconflow.cn/v1` 和 `SAGE_LLM_API_STYLE=chat_completions`。服务端会再次检查策略唯一性、S4 上下文条件、优先级及时间/候选总预算；API、网络或输出异常时自动返回 Rule 计划，并把降级原因写入 `warnings`。生成限制与 TTL/LRU 缓存参数见 `.env.example`。
+
+设置 `SAGE_PLANNER_TYPE=rule` 可完全跳过 LLM。Rule Planner 在无上下文时按 S1→S2→S3 规划，有上下文时增加 S4（慢 Hash 时 S4 插入到 S1 之后，即 S1→S4→S2→S3），并把慢 Hash 的候选池限制为任务上限的 25%。中等、未知和低验证成本默认分别使用候选上限的 60%、50% 和 100%。极小预算无法为所有策略各分配至少一个时间单位和候选时，按优先级保留前几个策略并返回 warning。
+
+Policy Validator 当前规则：白名单为 `S1`～`S4`（`S5` 尚未开放）；目标必须是 `hash`、`zip`、`pdf` 或 `office`，且 `S4` 要求 `context_available=true`；每个已选策略的时间和候选预算必须大于零，两类预算总和均不得超过 PRIR；未知参数、错误参数类型或越界值均拒绝。S1 不接收参数，S2 接收七类规则布尔开关，S3 接收 PCFG 模板数/概率/结构长度，S4 接收上下文来源开关和受候选预算限制的组合数。
+
 ## 执行
 
 ### 启动执行

@@ -8,6 +8,8 @@ export type TaskStatus =
   | 'cancelled'
 
 export type TargetType = 'hash' | 'zip' | 'pdf' | 'office' | 'unknown'
+export type PlannerType = 'mock' | 'rule' | 'llm' | 'adaptive'
+export type StrategyId = 'S1' | 'S2' | 'S3' | 'S4' | 'S5'
 
 export interface TaskInput {
   name: string
@@ -86,7 +88,7 @@ export interface PRIR {
 }
 
 export interface Strategy {
-  strategy_id: `S${1 | 2 | 3 | 4 | 5}`
+  strategy_id: StrategyId
   strategy_name: string
   priority: number
   time_budget: number
@@ -97,7 +99,7 @@ export interface Strategy {
 
 export interface StrategyPlan {
   task_id: string
-  planner_type: string
+  planner_type: PlannerType
   total_time_budget: number
   strategies: Strategy[]
   status: TaskStatus
@@ -140,6 +142,8 @@ export interface RunResult {
   total_recovered: number
   strategy_results: StrategyResult[]
   finished_at: string
+  recovered_items: Array<{ target: string; plaintext: string }>
+  message: string | null
 }
 
 export interface FlowSnapshot {
