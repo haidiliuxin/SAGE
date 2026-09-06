@@ -33,4 +33,4 @@ SAGE_LLM_CACHE_MAX_ENTRIES=256
 
 ## 当前边界
 
-LLM 的 `parameters` 在当前生成协议中仍保留为空对象，避免提前依赖尚未稳定的候选生成器参数；Validator 已预先定义并测试参数白名单和范围，可在乙方接口稳定后直接开放给 LLM Schema。当前异常降级目标是 Mock Planner，后续规则规划器完成后只需替换 `LLMPlanner` 注入的 fallback。
+LLM 的 `parameters` 在当前生成协议中仍保留为空对象，避免提前依赖尚未稳定的候选生成器参数；Validator 已预先定义并测试参数白名单和范围，可在乙方接口稳定后直接开放给 LLM Schema。LLM 异常时先降级到注入的 Rule Planner，Rule 无法处理（如 `unknown` 目标）时再降级到 Mock Planner。

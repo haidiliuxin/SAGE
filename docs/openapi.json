@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "SAGE-Pass API",
-    "description": "面向异构离线口令安全评测任务的编排 API。支持 mock 与基于 Hashcat 的真实执行（第二周），并接入 WinZip AES（$zip2$）加密 ZIP 目标；LLM 规划、动态调度与持久化恢复属于后续周次。",
+    "description": "面向异构离线口令安全评测任务的编排 API。支持 mock 与基于 Hashcat 的真实执行（第二周），并接入 WinZip AES（$zip2$）加密 ZIP 目标，并支持可配置的 LLM 策略规划。",
     "version": "0.2.0"
   },
   "paths": {
