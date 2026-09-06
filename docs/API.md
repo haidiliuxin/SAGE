@@ -245,6 +245,17 @@ Mock（第一周链路，无需候选）：
 
 真实执行按计划逐策略运行：后端为 S1 生成基础候选，并根据 S2 参数完成大小写、数字、年份、常见字符替换和符号变换；请求中的补充候选优先参与生成。候选按生成顺序稳定去重、按策略候选预算截断并分批交给 Hashcat。每个策略的多个批次共用该策略的时间预算，统计结果按策略累计；候选写入临时词表，任务结束后清理。
 
+#### S1/S2 候选生成约定
+
+- S1 使用后端内置的有序 Baseline 候选；请求中可选的 `candidates` 会排在内置候选之前；
+- S2 以补充候选和 S1 基线为种子，只执行当前 `StrategyItem.parameters` 中值为 `true` 的规则；
+- S2 支持 `capitalize_first`、`all_upper`、`all_lower`、`common_number_suffix`、`year_suffix`、`common_substitution` 和 `symbol_suffix`；
+- 去重保持首次出现顺序，且区分大小写；每条候选必须为 1～1024 字符的非空单行文本；
+- 每个策略最多产生其 `candidate_budget` 指定的数量，全次执行最多生成 100000 条；候选不足时以实际生成数量执行；
+- 默认每批最多 1000 条，同一策略的全部批次共享该策略的时间预算。
+
+真实执行的策略统计按批次累计到既有结果字段：`tested` 为 Hashcat 实际测试数量，`recovered` 为该策略去重后的恢复数量，`time` 为策略从开始到结束的耗时，`success_rate` 为 `recovered / tested`（未测试候选时为 0）。总结果中的 `total_tested` 为各策略测试数量之和，`total_recovered` 按 `target + plaintext` 全局去重。
+
 ### 查询执行状态
 
 `GET /api/runs/{run_id}/status`
