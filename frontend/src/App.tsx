@@ -3,6 +3,7 @@ import { api, ApiError } from './api/client'
 import { parseContextLists } from './context-input'
 import type {
   FileDetail,
+  ExecutionMode,
   FlowSnapshot,
   PlannerType,
   PRIR,
@@ -47,7 +48,7 @@ const stageLabels: Record<FlowStage, string> = {
   creating: '正在创建任务',
   analyzing: '正在生成 PRIR',
   planning: '正在编排策略',
-  executing: '正在模拟执行',
+  executing: '正在执行评测',
   completed: '评测已完成',
   cancelled: '任务已取消',
   error: '流程已中断',
@@ -171,6 +172,7 @@ function App() {
   const [view, setView] = useState<View>('overview')
   const [mobileNav, setMobileNav] = useState(false)
   const [form, setForm] = useState<TaskInput>(blankInput)
+  const [executionMode, setExecutionMode] = useState<ExecutionMode>('mock')
   const [keywordText, setKeywordText] = useState(blankInput.context.keywords.join('，'))
   const [yearText, setYearText] = useState(blankInput.context.years.join('，'))
   const [file, setFile] = useState<File | null>(null)
@@ -336,7 +338,7 @@ function App() {
       }))
 
       setStage('executing')
-      const run = await api.execute(task.task_id)
+      const run = await api.execute(task.task_id, executionMode)
       if (token !== runToken.current) return
       setSnapshot((current) => ({
         ...current,
@@ -455,7 +457,7 @@ function App() {
                 <div className="visual-metrics">
                   <div><small>任务画像</small><strong>PRIR</strong></div>
                   <div><small>策略空间</small><strong>S1—S4</strong></div>
-                  <div><small>执行模式</small><strong>MOCK</strong></div>
+                  <div><small>执行模式</small><strong>MOCK / REAL</strong></div>
                 </div>
               </div>
             </div>
@@ -481,7 +483,7 @@ function App() {
           <section className="page form-page">
             <div className="page-title">
               <div><span className="section-kicker">NEW ASSESSMENT</span><h1>创建安全评测</h1></div>
-              <p>任务创建后将调用后端生成 PRIR、编排 S1～S4 策略，并以 Mock 执行展示完整结果。</p>
+              <p>任务创建后将调用后端生成 PRIR、编排 S1～S4 策略，并按所选模式执行。</p>
             </div>
             <form onSubmit={runFlow} className="assessment-form">
               <div className="form-section">
@@ -508,6 +510,7 @@ function App() {
                 <div className="form-grid two">
                   <label><span>时间预算 <em>秒</em></span><input type="number" min="1" value={form.time_budget} onChange={(e) => updateForm('time_budget', Number(e.target.value))} required /></label>
                   <label><span>候选预算 <em>个</em></span><input type="number" min="1" value={form.candidate_budget} onChange={(e) => updateForm('candidate_budget', Number(e.target.value))} required /></label>
+                  <label><span>执行模式</span><select value={executionMode} onChange={(e) => setExecutionMode(e.target.value as ExecutionMode)}><option value="mock">Mock 模拟执行</option><option value="real">Real 本机 Hashcat</option></select></label>
                 </div>
               </div>
 
@@ -519,7 +522,7 @@ function App() {
                   <label><span>地区 <em>可选</em></span><input value={form.context.region} onChange={(e) => updateContext('region', e.target.value)} placeholder="例如：北京" /></label>
                   <label><span>组织 <em>可选</em></span><input value={form.context.organization} onChange={(e) => updateContext('organization', e.target.value)} placeholder="例如：学校、公司或实验室" /></label>
                 </div>
-                <label className="wide"><span>补充说明 <em>可选</em></span><textarea rows={3} value={form.context.description} onChange={(e) => updateContext('description', e.target.value)} placeholder="填写其他有助于生成候选的信息；不确定时请留空" /></label>
+                <label className="wide"><span>补充说明 <em>可选</em></span><textarea rows={3} value={form.context.description} onChange={(e) => updateContext('description', e.target.value)} placeholder="仅作为任务备注，不参与候选生成；不确定时请留空" /></label>
               </div>
 
               <div className="form-footer">
@@ -596,7 +599,7 @@ function App() {
                   </article>
                 </div>
 
-                {snapshot.result && <article className="result-strip"><div><span className="result-check"><Icon name="check" /></span><div><span className="section-kicker">ASSESSMENT COMPLETE</span><h2>模拟评测链路已完整跑通</h2><p>共测试 {formatNumber(snapshot.result.total_tested)} 个候选，恢复 {snapshot.result.total_recovered} 项。各策略统计见上方列表。</p></div></div><button className="button secondary" onClick={resetFlow}>新建评测 <Icon name="arrow" size={15} /></button></article>}
+                {snapshot.result && <article className="result-strip"><div><span className="result-check"><Icon name="check" /></span><div><span className="section-kicker">ASSESSMENT COMPLETE</span><h2>评测链路已完整跑通</h2><p>共测试 {formatNumber(snapshot.result.total_tested)} 个候选，恢复 {snapshot.result.total_recovered} 项。各策略统计见上方列表。</p></div></div><button className="button secondary" onClick={resetFlow}>新建评测 <Icon name="arrow" size={15} /></button></article>}
               </>
             )}
           </section>

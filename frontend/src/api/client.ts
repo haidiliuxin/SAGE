@@ -1,5 +1,6 @@
 import type {
   FileDetail,
+  ExecutionMode,
   PRIR,
   RunCreated,
   RunResult,
@@ -84,10 +85,10 @@ export const api = {
     return request<StrategyPlan>(`/api/tasks/${taskId}/plan`, { method: 'POST' })
   },
 
-  execute(taskId: string) {
+  execute(taskId: string, mode: ExecutionMode = 'mock') {
     return request<RunCreated>(`/api/tasks/${taskId}/execute`, {
       method: 'POST',
-      body: JSON.stringify({ mode: 'mock' }),
+      body: JSON.stringify({ mode }),
     })
   },
 

@@ -13,6 +13,7 @@ dependencies = [
   "SQLAlchemy>=2.0,<3.0",
   "python-multipart>=0.0.20,<1.0",
   "openai>=1.68,<3.0",
+  "pypinyin>=0.55,<1.0",
   "uvicorn[standard]>=0.34,<1.0",
 ]
 
@@ -26,6 +27,6 @@ dev = [
 where = ["src"]
 
 [tool.pytest.ini_options]
-addopts = "-q"
+addopts = "-q -p no:cacheprovider"
 pythonpath = ["src"]
 testpaths = ["tests"]

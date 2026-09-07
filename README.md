@@ -1,6 +1,6 @@
 # SAGE-Pass
 
-SAGE-Pass 是面向异构离线口令安全评测任务的智能策略编排系统。本仓库当前完成第 1 周后端基础与 Mock 链路，以及第 2 周的真实执行、智能规划和 S1/S2 候选生成：FastAPI 项目、SQLite 持久化、公共数据结构、任务 API、文件接入、PRIR 分析、Mock/Rule/LLM Planner、Mock/Real Executor、Hashcat 适配器、ZIP（WinZip AES）真实接入和候选批次执行。
+SAGE-Pass 是面向异构离线口令安全评测任务的智能策略编排系统。本仓库当前完成第 1 周后端基础与 Mock 链路，以及第 2 周的真实执行、智能规划和 S1～S4 候选生成：FastAPI 项目、SQLite 持久化、公共数据结构、任务 API、文件接入、PRIR 分析、Mock/Rule/LLM Planner、Mock/Real Executor、Hashcat 适配器、ZIP（WinZip AES）真实接入和候选批次执行。
 
 > Analyzer、Planner 与 Executor 均按团队统一接口实现。Mock 执行用于第一周链路演示；`mode: real` 会调用本机 Hashcat（ZIP 目标还需 zip2john）执行真实恢复，时间/候选预算用尽会自动停止。Planner 支持 OpenAI Responses API 和 OpenAI 兼容的 Chat Completions API（包括硅基流动）。
 
@@ -19,7 +19,9 @@ SAGE-Pass 是面向异构离线口令安全评测任务的智能策略编排系�
 - Real Executor：`mode: real` 逐策略运行 Hashcat，写回 `StrategyRunModel` 并把任务推进到终态，运行中可取消；
 - S1 Baseline：后端生成有序基础候选，并支持请求方提供可选的高优先级补充候选；
 - S2 Rule：根据计划参数执行首字母大写、全大写/小写、数字/年份/符号后缀及常见字符替换；
-- 候选管线：跨策略稳定去重、按策略候选预算截断、每批 1000 条输出，并保证 Hashcat 单行输入约束；
+- S3 PCFG-lite：按有限结构模板概率稳定展开词、年份、数字和符号组合；
+- S4 Context：规范化关键词，派生拼音与缩写，并组合任务年份、地区和组织词；
+- 候选管线：为候选保留策略和来源元数据，跨策略稳定去重、按策略候选预算截断、每批 1000 条输出，并保证 Hashcat 单行输入约束；
 - 策略执行统计：同一策略的多个 Hashcat 批次共享时间预算，累计 `tested`、`recovered`、耗时和成功率；
 - LLM Planner：只向模型发送结构化 PRIR，使用严格 JSON Schema 输出，支持温度、超时、最大输出 token、进程内 TTL/LRU 缓存及异常降级；
 - Policy Validator：在计划进入执行链路前校验策略白名单、目标适用性、双预算、优先级和参数范围；
@@ -89,7 +91,10 @@ src/sage_pass/
   analyzer.py        Analyzer 与 PRIR 持久化转换（ZIP 真实解析）
   planner.py         Mock/Rule/LLM Planner、结构化输出与缓存
   policy.py          LLM 策略计划白名单与安全约束校验
-  candidate_generator.py  S1/S2 候选生成、去重、预算与批次输出
+  candidate_types.py  候选值与来源元数据
+  pcfg_lite.py        S3 有限概率模板及惰性展开
+  context.py          S4 规范化、拼音、缩写与上下文组合
+  candidate_generator.py  S1～S4 候选生成、去重、预算与批次输出
   executor.py        Mock Executor
   real_executor.py   Real Executor：候选批次执行、策略统计与运行态
   hashcat_adapter.py Hashcat 适配器（启动/停止/超时/结果解析）

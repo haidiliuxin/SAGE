@@ -124,13 +124,13 @@ def test_real_execution_generates_s1_s2_and_reports_per_strategy_statistics(
     }
     assert statistics["S1"]["tested"] == planned_budgets["S1"]
     assert statistics["S2"]["tested"] == planned_budgets["S2"]
-    assert statistics["S3"]["tested"] == 0
-    assert result["total_tested"] == (
-        statistics["S1"]["tested"] + statistics["S2"]["tested"]
+    assert statistics["S3"]["tested"] == planned_budgets["S3"]
+    assert result["total_tested"] == sum(
+        item["tested"] for item in statistics.values()
     )
-    assert result["total_recovered"] == 2
+    assert result["total_recovered"] == 3
     plaintexts = {item["plaintext"] for item in result["recovered_items"]}
-    assert plaintexts == {"123456", "1234561"}
+    assert plaintexts == {"123456", "1234561", "qwerty"}
     for item in result["recovered_items"]:
         assert item["target"] == MD5_HEX
     # 任务被标记为完成。

@@ -53,6 +53,9 @@ async function openForm(t, fetchHandler) {
     input(label) {
       return renderer.root.findAllByType('label').find((node) => text(node).startsWith(label)).findByType('input')
     },
+    select(label) {
+      return renderer.root.findAllByType('label').find((node) => text(node).startsWith(label)).findByType('select')
+    },
     async submit() {
       await act(async () => renderer.root.findByType('form').props.onSubmit({ preventDefault() {} }))
     },
@@ -61,6 +64,7 @@ async function openForm(t, fetchHandler) {
 
 function remoteFlow(strategyIds = ['S1'], overrides = {}) {
   let submitted
+  let execution
   const taskId = 'T-TEST'
   const runId = 'R-TEST'
   const strategyNames = { S1: 'Baseline', S2: 'Rule', S3: 'PCFG-lite', S4: 'Context' }
@@ -82,7 +86,10 @@ function remoteFlow(strategyIds = ['S1'], overrides = {}) {
       warnings: [], ...overrides.prir,
     }
     else if (url.endsWith('/plan')) data = { task_id: taskId, planner_type: 'mock', total_time_budget: 300, strategies, status: 'planned', warnings: [], ...overrides.plan }
-    else if (url.endsWith('/execute')) data = { task_id: taskId, run_id: runId, status: 'running', started_at: new Date().toISOString() }
+    else if (url.endsWith('/execute')) {
+      execution = JSON.parse(init.body)
+      data = { task_id: taskId, run_id: runId, status: 'running', started_at: new Date().toISOString() }
+    }
     else if (url.endsWith('/status')) data = { task_id: taskId, run_id: runId, status: 'completed', progress: 1, current_strategy: null, elapsed_time: 2, tested: 123, recovered: 2, message: 'done' }
     else if (url.endsWith('/result')) data = {
       task_id: taskId, run_id: runId, status: 'completed', total_time: 2,
@@ -92,7 +99,7 @@ function remoteFlow(strategyIds = ['S1'], overrides = {}) {
     else throw new Error(`Unexpected URL: ${url}`)
     return Response.json(data)
   }
-  return { handler, submitted: () => submitted }
+  return { handler, submitted: () => submitted, execution: () => execution }
 }
 
 test('parse comma-separated context only at submission, accepting empty fields', () => {
@@ -119,6 +126,15 @@ test('component retains typed separators and submits separate keywords and years
   await form.submit()
   assert.deepEqual(remote.submitted().context.keywords, ['alpha', 'beta'])
   assert.deepEqual(remote.submitted().context.years, [2024, 2025])
+})
+
+test('execution mode defaults to mock and can be switched to real', async (t) => {
+  const remote = remoteFlow()
+  const form = await openForm(t, remote.handler)
+  assert.equal(form.select('执行模式').props.value, 'mock')
+  await act(async () => form.select('执行模式').props.onChange({ target: { value: 'real' } }))
+  await form.submit()
+  assert.deepEqual(remote.execution(), { mode: 'real' })
 })
 
 for (const ids of [['S1'], ['S1', 'S4']]) {

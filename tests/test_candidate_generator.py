@@ -9,7 +9,7 @@ import pytest
 from sage_pass.candidate_generator import CandidateGenerator
 from sage_pass.enums import ExecutionMode, PlannerType, StrategyId, TaskStatus
 from sage_pass.hashcat_adapter import HashcatAdapter, HashcatJob
-from sage_pass.schemas import ExecutionRequest, StrategyItem, StrategyPlan
+from sage_pass.schemas import ExecutionRequest, StrategyItem, StrategyPlan, TaskContext
 
 from sim_binaries import write_sim_scripts
 
@@ -235,3 +235,62 @@ def test_candidate_batches_execute_with_correct_per_strategy_statistics(
         StrategyId.S1: {"tested": 2, "recovered": 1},
         StrategyId.S2: {"tested": 4, "recovered": 2},
     }
+
+
+def test_s3_s4_are_budgeted_deduplicated_and_keep_provenance():
+    generator = CandidateGenerator(
+        baseline_candidates=("pass",),
+        number_suffixes=("1",),
+        year_suffixes=("2025",),
+        symbol_suffixes=("!",),
+    )
+    candidate_plan = plan(
+        strategy(StrategyId.S1, priority=1, candidate_budget=1),
+        strategy(
+            StrategyId.S3,
+            priority=2,
+            candidate_budget=2,
+            parameters={
+                "max_templates": 3,
+                "min_probability": 0.15,
+                "max_structure_length": 20,
+            },
+        ),
+        strategy(
+            StrategyId.S4,
+            priority=3,
+            candidate_budget=3,
+            parameters={
+                "use_keywords": True,
+                "use_pinyin": True,
+                "use_abbreviations": True,
+                "use_years": True,
+                "use_region": False,
+                "use_organization": False,
+                "max_combinations": 3,
+            },
+        ),
+    )
+    batches = list(generator.iter_plan_batches(
+        candidate_plan,
+        task_context=TaskContext(keywords=["南开"], years=[2025]),
+        batch_size=2,
+    ))
+    records = [record for batch in batches for record in batch.records]
+
+    assert [record.value for record in records] == [
+        "pass", "pass2025", "pass1", "南开", "nankai", "nk"
+    ]
+    assert len({record.value for record in records}) == len(records)
+    assert all(
+        tuple(record.value for record in batch.records) == batch.candidates
+        for batch in batches
+    )
+    assert [record.strategy_id for record in records] == [
+        StrategyId.S1,
+        StrategyId.S3,
+        StrategyId.S3,
+        StrategyId.S4,
+        StrategyId.S4,
+        StrategyId.S4,
+    ]
