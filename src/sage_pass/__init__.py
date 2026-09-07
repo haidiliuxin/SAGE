@@ -14,4 +14,3 @@ if sys.version_info < _MINIMUM_PYTHON:
     )
 
 __version__ = "0.2.0"
-
