@@ -199,3 +199,55 @@ test('workspace renders backend PRIR, rule plan budgets, parameters and warnings
   assert.match(pageText, /分析器降级提示/)
   assert.match(pageText, /慢 Hash 采用高概率小候选集/)
 })
+
+test('task list exposes pause/resume/cancel controls for active tasks and calls the status API', async (t) => {
+  const now = new Date().toISOString()
+  const base = (task_id, name, status) => ({
+    task_id, name, status, created_at: now, updated_at: now,
+    target: { type: 'hash', content: '$2b$10$fixture.for.authorized.testing', file_id: null },
+    known_algorithm: null, time_budget: 300, candidate_budget: 100000,
+    context: { keywords: [], years: [], region: null, organization: null, description: null },
+  })
+  const patches = []
+  const handler = async (url, init) => {
+    if (url === '/health') return Response.json({ status: 'ok' })
+    if (url.startsWith('/api/tasks?')) {
+      return Response.json({
+        items: [
+          base('T-RUN', '正在运行的任务', 'running'),
+          base('T-PAUSE', '已暂停的任务', 'paused'),
+          base('T-DONE', '已完成的任务', 'completed'),
+        ],
+        total: 3, limit: 100, offset: 0,
+      })
+    }
+    if (/^\/api\/tasks\/[^/]+\/status$/.test(url)) {
+      const task_id = url.split('/')[3]
+      const status = JSON.parse(init.body).status
+      patches.push({ task_id, status })
+      return Response.json(base(task_id, '任务', status))
+    }
+    throw new Error(`Unexpected URL: ${url}`)
+  }
+
+  const form = await openForm(t, handler)
+  const nav = form.renderer.root.findAllByType('button').find((b) => text(b).trim() === '任务记录')
+  await act(async () => nav.props.onClick())
+
+  const labels = () => form.renderer.root.findAllByType('button').map((b) => text(b).trim())
+  // Running and paused tasks are cancellable, completed is not.
+  assert.ok(labels().includes('暂停'))
+  assert.ok(labels().includes('继续'))
+  assert.equal(labels().filter((label) => label === '取消任务').length, 2)
+
+  // Pausing the running task issues PATCH status=paused and the row switches to 继续.
+  const pause = form.renderer.root.findAllByType('button').find((b) => text(b).trim() === '暂停')
+  await act(async () => pause.props.onClick())
+  assert.deepEqual(patches.at(-1), { task_id: 'T-RUN', status: 'paused' })
+  assert.ok(labels().includes('继续'))
+
+  // Resuming the now-paused running task issues PATCH status=running.
+  const resumeRows = form.renderer.root.findAllByType('button').filter((b) => text(b).trim() === '继续')
+  await act(async () => resumeRows[0].props.onClick())
+  assert.deepEqual(patches.at(-1), { task_id: 'T-RUN', status: 'running' })
+})

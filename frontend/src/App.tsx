@@ -189,6 +189,7 @@ function App() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [taskActionError, setTaskActionError] = useState('')
   const [cancellingTaskId, setCancellingTaskId] = useState<string | null>(null)
+  const [statusChangingTaskId, setStatusChangingTaskId] = useState<string | null>(null)
   const runToken = useRef(0)
 
   const progress = snapshot.status?.progress ?? (stage === 'completed' ? 1 : 0)
@@ -279,6 +280,36 @@ function App() {
     }
   }
 
+  const setTaskStatus = async (
+    task: Pick<TaskDetail, 'task_id' | 'name'>,
+    status: Extract<TaskStatus, 'paused' | 'running'>,
+    actionLabel: string,
+  ) => {
+    setStatusChangingTaskId(task.task_id)
+    setTaskActionError('')
+    try {
+      const updated = await api.updateTaskStatus(task.task_id, status)
+      setTasks((items) => items.map((item) => item.task_id === updated.task_id ? updated : item))
+      setSelectedTask((current) => current?.task_id === updated.task_id ? updated : current)
+      if (snapshot.task?.task_id === updated.task_id) {
+        setSnapshot((current) => ({ ...current, task: { ...current.task!, status: updated.status } }))
+      }
+    } catch (caught) {
+      const message = caught instanceof ApiError
+        ? `${caught.code}: ${caught.message}`
+        : caught instanceof Error ? caught.message : `${actionLabel}失败`
+      setTaskActionError(message)
+    } finally {
+      setStatusChangingTaskId(null)
+    }
+  }
+
+  const pauseTask = (task: Pick<TaskDetail, 'task_id' | 'name'>) =>
+    setTaskStatus(task, 'paused', '暂停任务')
+
+  const resumeTask = (task: Pick<TaskDetail, 'task_id' | 'name'>) =>
+    setTaskStatus(task, 'running', '继续任务')
+
   const updateForm = <K extends keyof TaskInput>(key: K, value: TaskInput[K]) =>
     setForm((current) => ({ ...current, [key]: value }))
 
@@ -357,7 +388,7 @@ function App() {
           status: current,
           task: previous.task ? { ...previous.task, status: current.status } : null,
         }))
-      } while (current.status === 'running')
+      } while (current.status === 'running' || current.status === 'paused')
 
       if (current.status === 'failed') throw new Error(current.message || '执行失败')
       if (current.status === 'cancelled') {
@@ -539,6 +570,24 @@ function App() {
             <div className="page-title workspace-title">
               <div><span className="section-kicker">COMMAND CENTER</span><h1>执行工作台</h1></div>
               <div className="workspace-actions">
+                {snapshot.task && snapshot.task.status === 'running' && (
+                  <button
+                    className="button pause-button"
+                    onClick={() => void pauseTask({ task_id: snapshot.task!.task_id, name: snapshot.input.name })}
+                    disabled={statusChangingTaskId === snapshot.task.task_id}
+                  >
+                    {statusChangingTaskId === snapshot.task.task_id ? '处理中…' : '暂停'}
+                  </button>
+                )}
+                {snapshot.task && snapshot.task.status === 'paused' && (
+                  <button
+                    className="button resume-button"
+                    onClick={() => void resumeTask({ task_id: snapshot.task!.task_id, name: snapshot.input.name })}
+                    disabled={statusChangingTaskId === snapshot.task.task_id}
+                  >
+                    {statusChangingTaskId === snapshot.task.task_id ? '处理中…' : '继续'}
+                  </button>
+                )}
                 {snapshot.task && !['completed', 'failed', 'cancelled'].includes(snapshot.task.status) && (
                   <button
                     className="button cancel-button"
@@ -548,7 +597,7 @@ function App() {
                     {cancellingTaskId === snapshot.task.task_id ? '取消中…' : '取消任务'}
                   </button>
                 )}
-                <div className={`stage-badge ${stage}`}><i /> {stageLabels[stage]}</div>
+                <div className={`stage-badge ${stage}${snapshot.task?.status === 'paused' ? ' paused' : ''}`}><i /> {snapshot.task?.status === 'paused' ? '已暂停' : stageLabels[stage]}</div>
               </div>
             </div>
             {taskActionError && <div className="error-banner"><strong>取消失败</strong><span>{taskActionError}</span><button onClick={() => setTaskActionError('')}>关闭</button></div>}
@@ -616,7 +665,7 @@ function App() {
               {!tasksLoading && tasksError && <div className="table-empty">加载失败：{tasksError}</div>}
               {!tasksLoading && !tasksError && tasks.map((task) => {
                 const canCancel = !['completed', 'failed', 'cancelled'].includes(task.status)
-                return <div className="table-row" key={task.task_id}><div><strong>{task.name}</strong><small>{task.task_id}</small></div><span>{task.target.type.toUpperCase()} · {task.known_algorithm ?? '自动识别'}</span><span>{task.time_budget}s / {formatNumber(task.candidate_budget)}</span><span><i className={`status-dot ${task.status}`} />{taskStatusLabels[task.status]}</span><div className="task-actions"><button onClick={() => void showTaskDetail(task.task_id)} disabled={detailLoading}>详情</button>{canCancel && <button className="danger" onClick={() => void cancelTask(task)} disabled={cancellingTaskId === task.task_id}>{cancellingTaskId === task.task_id ? '取消中…' : '取消任务'}</button>}</div></div>
+                return <div className="table-row" key={task.task_id}><div><strong>{task.name}</strong><small>{task.task_id}</small></div><span>{task.target.type.toUpperCase()} · {task.known_algorithm ?? '自动识别'}</span><span>{task.time_budget}s / {formatNumber(task.candidate_budget)}</span><span><i className={`status-dot ${task.status}`} />{taskStatusLabels[task.status]}</span><div className="task-actions"><button onClick={() => void showTaskDetail(task.task_id)} disabled={detailLoading}>详情</button>{task.status === 'running' && <button className="pause" onClick={() => void pauseTask(task)} disabled={statusChangingTaskId === task.task_id}>暂停</button>}{task.status === 'paused' && <button className="resume" onClick={() => void resumeTask(task)} disabled={statusChangingTaskId === task.task_id}>继续</button>}{canCancel && <button className="danger" onClick={() => void cancelTask(task)} disabled={cancellingTaskId === task.task_id}>{cancellingTaskId === task.task_id ? '取消中…' : '取消任务'}</button>}</div></div>
               })}
               {!tasksLoading && !tasksError && tasks.length === 0 && <div className="table-empty">后端尚无任务记录</div>}
             </div>
