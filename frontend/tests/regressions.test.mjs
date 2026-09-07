@@ -90,7 +90,12 @@ function remoteFlow(strategyIds = ['S1'], overrides = {}) {
       execution = JSON.parse(init.body)
       data = { task_id: taskId, run_id: runId, status: 'running', started_at: new Date().toISOString() }
     }
-    else if (url.endsWith('/status')) data = { task_id: taskId, run_id: runId, status: 'completed', progress: 1, current_strategy: null, elapsed_time: 2, tested: 123, recovered: 2, message: 'done' }
+    else if (url === `/api/runs/${runId}/status`) data = overrides.status
+      ? await overrides.status()
+      : { task_id: taskId, run_id: runId, status: 'completed', progress: 1, current_strategy: null, elapsed_time: 2, tested: 123, recovered: 2, message: 'done' }
+    else if (url === `/api/tasks/${taskId}/status`) data = overrides.taskStatus
+      ? await overrides.taskStatus(JSON.parse(init.body).status)
+      : { task_id: taskId, status: JSON.parse(init.body).status, created_at: new Date().toISOString() }
     else if (url.endsWith('/result')) data = {
       task_id: taskId, run_id: runId, status: 'completed', total_time: 2,
       total_tested: 123, total_recovered: 2, finished_at: new Date().toISOString(),
@@ -200,7 +205,43 @@ test('workspace renders backend PRIR, rule plan budgets, parameters and warnings
   assert.match(pageText, /慢 Hash 采用高概率小候选集/)
 })
 
-test('task list exposes pause/resume/cancel controls for active tasks and calls the status API', async (t) => {
+test('workspace distinguishes a pause request from a completed batch-boundary pause', async (t) => {
+  let resolveFirstStatus
+  let resolveSecondStatus
+  const firstStatus = new Promise((resolve) => { resolveFirstStatus = resolve })
+  const secondStatus = new Promise((resolve) => { resolveSecondStatus = resolve })
+  let statusCall = 0
+  const remote = remoteFlow(['S1'], {
+    status: () => (++statusCall === 1 ? firstStatus : secondStatus),
+    taskStatus: (status) => ({ task_id: 'T-TEST', status, created_at: new Date().toISOString() }),
+  })
+  const form = await openForm(t, remote.handler)
+  let flow
+  await act(async () => {
+    flow = form.renderer.root.findByType('form').props.onSubmit({ preventDefault() {} })
+    await new Promise(setImmediate)
+  })
+
+  const button = (label) => form.renderer.root.findAllByType('button').find((node) => text(node).trim() === label)
+  assert.ok(button('批次后暂停'))
+  await act(async () => button('批次后暂停').props.onClick())
+  assert.match(text(form.renderer.root), /等待当前批次结束/)
+  assert.match(text(form.renderer.root), /当前批次会继续执行，之后停止提交新批次/)
+
+  await act(async () => {
+    resolveFirstStatus({ task_id: 'T-TEST', run_id: 'R-TEST', status: 'paused', progress: 0.5, current_strategy: null, elapsed_time: 1, tested: 50, recovered: 0, message: 'paused' })
+    await new Promise(setImmediate)
+  })
+  assert.match(text(form.renderer.root), /已暂停/)
+  assert.ok(button('继续'))
+
+  await act(async () => {
+    resolveSecondStatus({ task_id: 'T-TEST', run_id: 'R-TEST', status: 'completed', progress: 1, current_strategy: null, elapsed_time: 2, tested: 123, recovered: 2, message: 'done' })
+    await flow
+  })
+})
+
+test('task list keeps execution controls out of the archive view', async (t) => {
   const now = new Date().toISOString()
   const base = (task_id, name, status) => ({
     task_id, name, status, created_at: now, updated_at: now,
@@ -208,7 +249,6 @@ test('task list exposes pause/resume/cancel controls for active tasks and calls 
     known_algorithm: null, time_budget: 300, candidate_budget: 100000,
     context: { keywords: [], years: [], region: null, organization: null, description: null },
   })
-  const patches = []
   const handler = async (url, init) => {
     if (url === '/health') return Response.json({ status: 'ok' })
     if (url.startsWith('/api/tasks?')) {
@@ -221,12 +261,6 @@ test('task list exposes pause/resume/cancel controls for active tasks and calls 
         total: 3, limit: 100, offset: 0,
       })
     }
-    if (/^\/api\/tasks\/[^/]+\/status$/.test(url)) {
-      const task_id = url.split('/')[3]
-      const status = JSON.parse(init.body).status
-      patches.push({ task_id, status })
-      return Response.json(base(task_id, '任务', status))
-    }
     throw new Error(`Unexpected URL: ${url}`)
   }
 
@@ -235,19 +269,8 @@ test('task list exposes pause/resume/cancel controls for active tasks and calls 
   await act(async () => nav.props.onClick())
 
   const labels = () => form.renderer.root.findAllByType('button').map((b) => text(b).trim())
-  // Running and paused tasks are cancellable, completed is not.
-  assert.ok(labels().includes('暂停'))
-  assert.ok(labels().includes('继续'))
-  assert.equal(labels().filter((label) => label === '取消任务').length, 2)
-
-  // Pausing the running task issues PATCH status=paused and the row switches to 继续.
-  const pause = form.renderer.root.findAllByType('button').find((b) => text(b).trim() === '暂停')
-  await act(async () => pause.props.onClick())
-  assert.deepEqual(patches.at(-1), { task_id: 'T-RUN', status: 'paused' })
-  assert.ok(labels().includes('继续'))
-
-  // Resuming the now-paused running task issues PATCH status=running.
-  const resumeRows = form.renderer.root.findAllByType('button').filter((b) => text(b).trim() === '继续')
-  await act(async () => resumeRows[0].props.onClick())
-  assert.deepEqual(patches.at(-1), { task_id: 'T-RUN', status: 'running' })
+  assert.equal(labels().filter((label) => label === '详情').length, 3)
+  assert.ok(!labels().includes('暂停'))
+  assert.ok(!labels().includes('继续'))
+  assert.ok(!labels().includes('取消任务'))
 })

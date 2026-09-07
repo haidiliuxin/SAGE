@@ -190,10 +190,16 @@ function App() {
   const [taskActionError, setTaskActionError] = useState('')
   const [cancellingTaskId, setCancellingTaskId] = useState<string | null>(null)
   const [statusChangingTaskId, setStatusChangingTaskId] = useState<string | null>(null)
+  const [pauseRequestedTaskId, setPauseRequestedTaskId] = useState<string | null>(null)
   const runToken = useRef(0)
 
   const progress = snapshot.status?.progress ?? (stage === 'completed' ? 1 : 0)
   const completedStep = useMemo(() => stageOrder.indexOf(stage), [stage])
+  const pausePending = Boolean(
+    snapshot.task
+    && snapshot.task.status === 'running'
+    && pauseRequestedTaskId === snapshot.task.task_id,
+  )
 
   useEffect(() => {
     let active = true
@@ -267,6 +273,7 @@ function App() {
       setSelectedTask((current) => current?.task_id === updated.task_id ? updated : current)
       if (snapshot.task?.task_id === updated.task_id) {
         runToken.current += 1
+        setPauseRequestedTaskId(null)
         setSnapshot((current) => ({ ...current, task: { ...current.task!, status: 'cancelled' } }))
         setStage('cancelled')
       }
@@ -291,9 +298,12 @@ function App() {
       const updated = await api.updateTaskStatus(task.task_id, status)
       setTasks((items) => items.map((item) => item.task_id === updated.task_id ? updated : item))
       setSelectedTask((current) => current?.task_id === updated.task_id ? updated : current)
-      if (snapshot.task?.task_id === updated.task_id) {
-        setSnapshot((current) => ({ ...current, task: { ...current.task!, status: updated.status } }))
-      }
+      if (status === 'paused') setPauseRequestedTaskId(updated.task_id)
+      else setPauseRequestedTaskId(null)
+      setSnapshot((current) => {
+        if (current.task?.task_id !== updated.task_id || status === 'paused') return current
+        return { ...current, task: { ...current.task, status: updated.status } }
+      })
     } catch (caught) {
       const message = caught instanceof ApiError
         ? `${caught.code}: ${caught.message}`
@@ -333,6 +343,7 @@ function App() {
     event?.preventDefault()
     const token = ++runToken.current
     setError('')
+    setPauseRequestedTaskId(null)
     setSnapshot({ ...initialSnapshot, input: form })
     setView('workspace')
 
@@ -383,6 +394,7 @@ function App() {
         await new Promise((resolve) => window.setTimeout(resolve, 1000))
         current = await api.getStatus(run.run_id)
         if (token !== runToken.current) return
+        if (current.status !== 'running') setPauseRequestedTaskId(null)
         setSnapshot((previous) => ({
           ...previous,
           status: current,
@@ -419,6 +431,7 @@ function App() {
     setStage('idle')
     setSnapshot(initialSnapshot)
     setError('')
+    setPauseRequestedTaskId(null)
     setView('new')
   }
 
@@ -574,9 +587,9 @@ function App() {
                   <button
                     className="button pause-button"
                     onClick={() => void pauseTask({ task_id: snapshot.task!.task_id, name: snapshot.input.name })}
-                    disabled={statusChangingTaskId === snapshot.task.task_id}
+                    disabled={statusChangingTaskId === snapshot.task.task_id || pausePending}
                   >
-                    {statusChangingTaskId === snapshot.task.task_id ? '处理中…' : '暂停'}
+                    {statusChangingTaskId === snapshot.task.task_id ? '处理中…' : '批次后暂停'}
                   </button>
                 )}
                 {snapshot.task && snapshot.task.status === 'paused' && (
@@ -597,10 +610,11 @@ function App() {
                     {cancellingTaskId === snapshot.task.task_id ? '取消中…' : '取消任务'}
                   </button>
                 )}
-                <div className={`stage-badge ${stage}${snapshot.task?.status === 'paused' ? ' paused' : ''}`}><i /> {snapshot.task?.status === 'paused' ? '已暂停' : stageLabels[stage]}</div>
+                <div className={`stage-badge ${pausePending ? 'pause-pending' : snapshot.task?.status === 'paused' ? 'paused' : stage}`}><i /> {pausePending ? '等待当前批次结束' : snapshot.task?.status === 'paused' ? '已暂停' : stageLabels[stage]}</div>
               </div>
             </div>
-            {taskActionError && <div className="error-banner"><strong>取消失败</strong><span>{taskActionError}</span><button onClick={() => setTaskActionError('')}>关闭</button></div>}
+            {pausePending && <div className="pause-notice"><strong>暂停请求已受理</strong><span>当前批次会继续执行，之后停止提交新批次</span></div>}
+            {taskActionError && <div className="error-banner"><strong>操作失败</strong><span>{taskActionError}</span><button onClick={() => setTaskActionError('')}>关闭</button></div>}
 
             {stage === 'idle' ? (
               <div className="empty-state">
@@ -663,10 +677,9 @@ function App() {
               <div className="table-head"><span>任务</span><span>目标</span><span>预算</span><span>状态</span><span>操作</span></div>
               {tasksLoading && <div className="table-empty">正在从后端加载任务记录…</div>}
               {!tasksLoading && tasksError && <div className="table-empty">加载失败：{tasksError}</div>}
-              {!tasksLoading && !tasksError && tasks.map((task) => {
-                const canCancel = !['completed', 'failed', 'cancelled'].includes(task.status)
-                return <div className="table-row" key={task.task_id}><div><strong>{task.name}</strong><small>{task.task_id}</small></div><span>{task.target.type.toUpperCase()} · {task.known_algorithm ?? '自动识别'}</span><span>{task.time_budget}s / {formatNumber(task.candidate_budget)}</span><span><i className={`status-dot ${task.status}`} />{taskStatusLabels[task.status]}</span><div className="task-actions"><button onClick={() => void showTaskDetail(task.task_id)} disabled={detailLoading}>详情</button>{task.status === 'running' && <button className="pause" onClick={() => void pauseTask(task)} disabled={statusChangingTaskId === task.task_id}>暂停</button>}{task.status === 'paused' && <button className="resume" onClick={() => void resumeTask(task)} disabled={statusChangingTaskId === task.task_id}>继续</button>}{canCancel && <button className="danger" onClick={() => void cancelTask(task)} disabled={cancellingTaskId === task.task_id}>{cancellingTaskId === task.task_id ? '取消中…' : '取消任务'}</button>}</div></div>
-              })}
+              {!tasksLoading && !tasksError && tasks.map((task) => (
+                <div className="table-row" key={task.task_id}><div><strong>{task.name}</strong><small>{task.task_id}</small></div><span>{task.target.type.toUpperCase()} · {task.known_algorithm ?? '自动识别'}</span><span>{task.time_budget}s / {formatNumber(task.candidate_budget)}</span><span><i className={`status-dot ${task.status}`} />{taskStatusLabels[task.status]}</span><div className="task-actions"><button onClick={() => void showTaskDetail(task.task_id)} disabled={detailLoading}>详情</button></div></div>
+              ))}
               {!tasksLoading && !tasksError && tasks.length === 0 && <div className="table-empty">后端尚无任务记录</div>}
             </div>
             {detailLoading && <div className="task-detail-card"><div className="panel-placeholder"><span className="loader" />正在读取任务详情</div></div>}

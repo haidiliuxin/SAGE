@@ -137,9 +137,13 @@ main { grid-column: 2; min-width: 0; }
 .stage-badge i { width: 7px; height: 7px; border-radius: 50%; background: #94978f; }
 .stage-badge.executing i { background: #698a6a; animation: pulse 1.2s infinite; }
 .stage-badge.completed i { background: #57805f; }
+.stage-badge.pause-pending { border-color: #dfd1a4; background: #fbf7e9; color: #806b22; }
+.stage-badge.pause-pending i { background: #b08c46; animation: pulse 1.2s infinite; }
 .stage-badge.paused i { background: #b08c46; animation: none; }
 .stage-badge.cancelled i { background: #9b765e; }
 .stage-badge.error i { background: #a95e57; }
+.pause-notice { margin: 12px 0 0; padding: 11px 14px; display: flex; align-items: center; gap: 12px; border: 1px solid #dfd1a4; border-radius: 4px; background: #fbf7e9; color: #786725; font-size: 10px; }
+.pause-notice strong { color: #594c1d; font-size: 10px; }
 @keyframes pulse { 50% { box-shadow: 0 0 0 5px #698a6a1b; } }
 .empty-state { min-height: 455px; margin-top: 28px; border: 1px solid var(--line); background: #f7f7f3; display: grid; place-content: center; justify-items: center; text-align: center; }
 .empty-state > span { width: 64px; height: 64px; display: grid; place-items: center; color: #617064; border: 1px solid #d1d5cc; border-radius: 50%; }
@@ -192,9 +196,6 @@ main { grid-column: 2; min-width: 0; }
 .task-actions { display: flex; align-items: center; gap: 7px; }
 .task-actions button, .detail-close { border: 1px solid #d3d5ce; border-radius: 3px; padding: 6px 8px; background: transparent; color: #646760; font-size: 9px; cursor: pointer; white-space: nowrap; }
 .task-actions button:hover, .detail-close:hover { background: #eff0eb; }
-.task-actions button.danger { border-color: #dec9c4; color: #945f58; }
-.task-actions button.pause { border-color: #d6cd9f; color: #8a7420; }
-.task-actions button.resume { border-color: #c2d0c4; color: #4e7255; }
 .task-actions button:disabled { opacity: .5; cursor: wait; }
 .task-detail-card { margin-top: 18px; padding: 24px; border: 1px solid var(--line); background: #fafaf7; }
 .task-detail-card .panel-head h2 { margin: 7px 0 0; font: 500 20px Georgia, 'Noto Serif SC', serif; }

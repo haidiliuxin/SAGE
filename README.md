@@ -36,8 +36,25 @@ PowerShell：
 
 ```powershell
 py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe --version
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 .\.venv\Scripts\python.exe -m uvicorn sage_pass.main:app --app-dir src --reload
+```
+
+项目要求 Python 3.11 或更高版本，推荐 Python 3.12。第二条命令必须显示
+`Python 3.11.x` 或 `Python 3.12.x`；不要复用由 Python 3.9 创建的 `.venv`。
+使用 `pip install -e ".[dev]"` 会先读取 `pyproject.toml` 并校验 Python 版本，
+从而避免依赖看似安装成功、启动时才因新版依赖语法报错。
+
+如果已有 `.venv` 使用了错误的 Python 版本，请先退出虚拟环境，将旧目录改名后重建：
+
+```powershell
+deactivate
+Rename-Item -LiteralPath .venv -NewName .venv-py39-backup
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 ```
 
 启动后可访问：
