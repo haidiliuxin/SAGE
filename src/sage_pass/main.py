@@ -13,6 +13,8 @@ from .errors import AppError
 from .planner import build_planner
 from .real_executor import RealExecutor
 from .routes import router
+from .run_control import RunControl
+from .service import finalize_interrupted_tasks
 from .zip_adapter import ZipHashExtractor
 
 
@@ -28,6 +30,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(application: FastAPI):
         resolved.upload_dir.mkdir(parents=True, exist_ok=True)
         database.create_all()
+        # 异常恢复：把上次进程中断残留的 running/paused 任务收尾，避免悬挂。
+        finalize_interrupted_tasks(database.session_factory)
+        control = RunControl()
+        application.state.run_control = control
         application.state.zip_extractor = ZipHashExtractor(
             resolved.zip2john_path
         )
@@ -35,6 +41,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             session_factory=database.session_factory,
             settings=resolved,
             zip_extractor=application.state.zip_extractor,
+            control=control,
         )
         application.state.planner = build_planner(resolved)
         yield

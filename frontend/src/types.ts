@@ -3,6 +3,7 @@ export type TaskStatus =
   | 'analyzed'
   | 'planned'
   | 'running'
+  | 'paused'
   | 'completed'
   | 'failed'
   | 'cancelled'

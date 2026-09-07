@@ -59,6 +59,7 @@ const taskStatusLabels: Record<TaskStatus, string> = {
   analyzed: '已分析',
   planned: '已规划',
   running: '执行中',
+  paused: '已暂停',
   completed: '已完成',
   failed: '失败',
   cancelled: '已取消',

@@ -6,6 +6,7 @@ class TaskStatus(StrEnum):
     ANALYZED = "analyzed"
     PLANNED = "planned"
     RUNNING = "running"
+    PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"

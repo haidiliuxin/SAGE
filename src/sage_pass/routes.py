@@ -10,7 +10,13 @@ from .analyzer import MockAnalyzer, prir_to_schema
 from .enums import ExecutionMode, TaskStatus
 from .errors import AppError
 from .executor import MockExecutor
-from .repository import FileRepository, PRIRRepository, TaskRepository
+from .repository import (
+    FileRepository,
+    PRIRRepository,
+    StrategyRunRepository,
+    TaskRepository,
+)
+from .run_control import RunControl
 from .schemas import (
     ErrorResponse,
     ExecutionRequest,
@@ -131,11 +137,19 @@ def patch_task_status(
     session: SessionDependency,
 ) -> TaskDetail:
     task = require_task(session, task_id)
-    if (
-        payload.status == TaskStatus.CANCELLED
-        and TaskStatus(task.status) == TaskStatus.RUNNING
-    ):
+    current = TaskStatus(task.status)
+    run_ids = StrategyRunRepository(session).active_run_ids(task_id)
+    control: RunControl = request.app.state.run_control
+    if payload.status == TaskStatus.PAUSED and current == TaskStatus.RUNNING:
+        control.pause_many(run_ids)
+    elif payload.status == TaskStatus.RUNNING and current == TaskStatus.PAUSED:
+        control.resume_many(run_ids)
+    elif payload.status == TaskStatus.CANCELLED and current in {
+        TaskStatus.RUNNING,
+        TaskStatus.PAUSED,
+    }:
         request.app.state.real_executor.cancel_task_runs(task_id)
+        control.clear_many(run_ids)
     return task_to_schema(update_task_status(session, task, payload.status))
 
 
@@ -261,17 +275,18 @@ def get_run_status(
     request: Request, run_id: str, session: SessionDependency
 ) -> RunStatus:
     real_executor = request.app.state.real_executor
+    control = request.app.state.run_control
     if real_executor.has_run(run_id):
         status_result = real_executor.status(run_id)
-        _sync_task_status_if_running(
+        _sync_task_status_after_run(
             session, status_result.task_id, status_result.status
         )
         return status_result
-    status_result = MockExecutor(session).status(run_id)
+    status_result = MockExecutor(session, control=control).status(run_id)
     if status_result.status == TaskStatus.COMPLETED:
-        task = require_task(session, status_result.task_id)
-        if TaskStatus(task.status) == TaskStatus.RUNNING:
-            update_task_status(session, task, TaskStatus.COMPLETED)
+        _sync_task_status_after_run(
+            session, status_result.task_id, TaskStatus.COMPLETED
+        )
     return status_result
 
 
@@ -287,25 +302,24 @@ def get_run_result(
     real_executor = request.app.state.real_executor
     if real_executor.has_run(run_id):
         result = real_executor.result(run_id)
-        _sync_task_status_if_running(session, result.task_id, result.status)
+        _sync_task_status_after_run(session, result.task_id, result.status)
         return result
     result = MockExecutor(session).result(run_id)
-    task = require_task(session, result.task_id)
-    if TaskStatus(task.status) == TaskStatus.RUNNING:
-        update_task_status(session, task, TaskStatus.COMPLETED)
+    _sync_task_status_after_run(session, result.task_id, TaskStatus.COMPLETED)
     return result
 
 
-def _sync_task_status_if_running(
+def _sync_task_status_after_run(
     session: Session, task_id: str, target: TaskStatus
 ) -> None:
-    """真实 run 到达终态后，把任务状态同步到终态（与 mock 分支语义一致）。
+    """run 到达终态后，把任务状态同步到终态。
 
-    后台工作线程也会回写任务状态，这里以请求线程的会话再同步一次，
-    避免极端时序下任务停留在 running。
+    任务可能停留在 running 或 paused；两者都可以向终态推进，避免
+    结果已产生但任务仍悬挂。仍在执行中的 run 不处理。
     """
-    if target == TaskStatus.RUNNING:
+    if target in {TaskStatus.RUNNING, TaskStatus.PAUSED}:
         return
     task = require_task(session, task_id)
-    if TaskStatus(task.status) == TaskStatus.RUNNING:
+    current = TaskStatus(task.status)
+    if current in {TaskStatus.RUNNING, TaskStatus.PAUSED}:
         update_task_status(session, task, target)
