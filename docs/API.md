@@ -9,7 +9,7 @@
 
 - 时间预算单位为秒，候选预算为整数。
 - 任务使用 `task_id`，上传文件使用 `file_id`，执行使用 `run_id`。
-- 任务状态：`created`、`analyzed`、`planned`、`running`、`completed`、`failed`、`cancelled`。
+- 任务状态：`created`、`analyzed`、`planned`、`running`、`paused`、`completed`、`failed`、`cancelled`。
 - 目标类型：`hash`、`zip`、`pdf`、`office`、`unknown`。
 - 验证成本：`low`、`medium`、`high`、`unknown`。
 - 策略编号：`S1`、`S2`、`S3`、`S4`、`S5`。
@@ -128,10 +128,15 @@
 created  -> analyzed | failed | cancelled
 analyzed -> planned  | failed | cancelled
 planned  -> running  | failed | cancelled
-running  -> completed | failed | cancelled
+running  -> paused | completed | failed | cancelled
+paused   -> running | completed | failed | cancelled
 ```
 
-重复写入当前状态按幂等成功处理；终态不允许回退。对正在 `running` 的真实执行取消，会同步停止底层 Hashcat 进程。
+重复写入当前状态按幂等成功处理；终态不允许回退。
+
+**暂停/继续（第 3 周）**：`running` 任务可 `PATCH {"status":"paused"}` 暂停，`paused` 任务可 `PATCH {"status":"running"}` 继续，或 `PATCH {"status":"cancelled"}` 取消。Mock 执行在暂停期间冻结进度；真实执行在**候选批次边界**暂停（当前批次结束后进入 `paused`，运行状态消息会先提示“等待当前批次结束”），继续后从下一批候选恢复。取消会同步停止底层 Hashcat 进程（含暂停中取消）。
+
+**异常恢复（第 3 周 v1）**：服务启动时会自动收尾上次进程中断残留的 `running/paused` 任务——全部策略行已完成则任务置为 `completed`，否则残留行与任务置为 `failed`，避免状态悬挂。
 
 ## Analyzer 与 Planner
 

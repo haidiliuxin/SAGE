@@ -90,6 +90,21 @@ class StrategyRunRepository:
             )
         )
 
+    def active_run_ids(self, task_id: str) -> list[str]:
+        """返回任务当前处于 running/paused 的 run_id（可能有历史多条）。"""
+        return list(
+            self.session.scalars(
+                select(StrategyRunModel.run_id)
+                .where(
+                    StrategyRunModel.task_id == task_id,
+                    StrategyRunModel.status.in_(
+                        ("running", "paused")
+                    ),
+                )
+                .distinct()
+            )
+        )
+
     def save_all(self, items: list[StrategyRunModel]) -> list[StrategyRunModel]:
         self.session.commit()
         for item in items:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime
 
 from sqlalchemy.orm import Session
@@ -8,6 +9,7 @@ from .enums import TaskStatus
 from .errors import AppError
 from .models import StrategyRunModel
 from .repository import StrategyRunRepository
+from .run_control import RunControl
 from .schemas import (
     ExecutionStarted,
     RunResult,
@@ -26,8 +28,11 @@ MOCK_MIN_INTERACTION_SECONDS = 5.0
 
 
 class MockExecutor:
-    def __init__(self, session: Session) -> None:
+    def __init__(
+        self, session: Session, *, control: RunControl | None = None
+    ) -> None:
         self.session = session
+        self.control = control
 
     def start(self, task: TaskDetail, plan: StrategyPlan) -> ExecutionStarted:
         if not plan.strategies:
@@ -66,19 +71,38 @@ class MockExecutor:
 
     def status(self, run_id: str) -> RunStatus:
         items = _require_run(self.session, run_id)
-        _refresh_run_progress(self.session, items)
-        progress = _run_progress(items)
-        current = _current_strategy(items, progress)
+        first = items[0]
+        paused = bool(
+            self.control
+            and self.control.is_paused(run_id)
+            and TaskStatus(first.status) != TaskStatus.COMPLETED
+        )
+        elapsed = _effective_elapsed(first, self.control, run_id)
+        if not paused and TaskStatus(first.status) != TaskStatus.COMPLETED:
+            _refresh_run_progress(self.session, items, elapsed)
+            first = items[0]
+        duration = _run_duration(items)
+        progress = (
+            1.0
+            if TaskStatus(first.status) == TaskStatus.COMPLETED
+            else min(1.0, elapsed / duration)
+        )
+        status = (
+            TaskStatus.PAUSED
+            if paused
+            else TaskStatus(first.status)
+        )
+        current = _current_strategy(items, progress, paused)
         return RunStatus(
-            task_id=items[0].task_id,
+            task_id=first.task_id,
             run_id=run_id,
-            status=TaskStatus(items[0].status),
+            status=status,
             progress=progress,
             current_strategy=current,
-            elapsed_time=_elapsed_seconds(items[0].started_at),
+            elapsed_time=elapsed,
             tested=sum(item.tested for item in items),
             recovered=sum(item.recovered for item in items),
-            message=_status_message(items, current),
+            message=_status_message(first, current, paused),
         )
 
     def result(self, run_id: str) -> RunResult:
@@ -120,10 +144,27 @@ def _require_run(session: Session, run_id: str) -> list[StrategyRunModel]:
     return items
 
 
-def _refresh_run_progress(session: Session, items: list[StrategyRunModel]) -> None:
+def _effective_elapsed(
+    first: StrategyRunModel,
+    control: RunControl | None,
+    run_id: str,
+) -> float:
+    """未暂停运行的真实墙钟耗时（扣除累计暂停秒数）。"""
+    if first.started_at is None:
+        return 0.0
+    started_epoch = datetime.fromisoformat(first.started_at).timestamp()
+    offset = control.offset_seconds(run_id) if control is not None else 0.0
+    return max(0.0, time.time() - started_epoch - offset)
+
+
+def _refresh_run_progress(
+    session: Session,
+    items: list[StrategyRunModel],
+    elapsed: float,
+) -> None:
     if TaskStatus(items[0].status) == TaskStatus.COMPLETED:
         return
-    progress = _run_progress(items)
+    progress = min(1.0, elapsed / _run_duration(items))
     for item in items:
         item.tested = int(item.candidate_budget * progress)
         item.recovered = _mock_recovered(item, progress)
@@ -143,12 +184,6 @@ def _complete_run(session: Session, items: list[StrategyRunModel]) -> None:
     StrategyRunRepository(session).save_all(items)
 
 
-def _run_progress(items: list[StrategyRunModel]) -> float:
-    if TaskStatus(items[0].status) == TaskStatus.COMPLETED:
-        return 1.0
-    return min(1.0, _elapsed_seconds(items[0].started_at) / _run_duration(items))
-
-
 def _run_duration(items: list[StrategyRunModel]) -> float:
     candidate_count = sum(item.candidate_budget for item in items)
     return max(
@@ -164,15 +199,25 @@ def _elapsed_seconds(started_at: str | None) -> float:
     return max(0.0, (datetime.fromisoformat(now_iso()) - started).total_seconds())
 
 
-def _current_strategy(items: list[StrategyRunModel], progress: float) -> str | None:
-    if not items or progress >= 1.0:
+def _current_strategy(
+    items: list[StrategyRunModel],
+    progress: float,
+    paused: bool = False,
+) -> str | None:
+    if not items or progress >= 1.0 or paused:
         return None
     index = min(int(progress * len(items)), len(items) - 1)
     return items[index].strategy_id
 
 
-def _status_message(items: list[StrategyRunModel], current: str | None) -> str:
-    if TaskStatus(items[0].status) == TaskStatus.COMPLETED:
+def _status_message(
+    first: StrategyRunModel,
+    current: str | None,
+    paused: bool,
+) -> str:
+    if paused:
+        return "模拟执行已暂停，继续后将恢复推进"
+    if TaskStatus(first.status) == TaskStatus.COMPLETED:
         return "模拟执行已完成"
     if current == "S4":
         return "正在执行上下文策略"

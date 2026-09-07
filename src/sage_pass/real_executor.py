@@ -22,6 +22,7 @@ from .hashcat_adapter import (
     resolve_hashcat_mode,
 )
 from .repository import FileRepository, StrategyRunRepository, TaskRepository
+from .run_control import RunControl
 from .schemas import (
     ExecutionRequest,
     ExecutionStarted,
@@ -96,6 +97,7 @@ class RealExecutor:
         hashcat: HashcatAdapter | None = None,
         zip_extractor: ZipHashExtractor | None = None,
         candidate_generator: CandidateGenerator | None = None,
+        control: RunControl | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.settings = settings
@@ -104,6 +106,7 @@ class RealExecutor:
             settings.zip2john_path
         )
         self.candidate_generator = candidate_generator or CandidateGenerator()
+        self.control = control
         self._registry: dict[str, _RunState] = {}
         self._task_runs: dict[str, set[str]] = {}
         self._lock = threading.RLock()
@@ -126,7 +129,16 @@ class RealExecutor:
                 ),
                 None,
             )
-            message = self._status_message(state, current)
+            inflight = any(
+                item.handle is not None for item in state.strategies
+            )
+            pause_requested = bool(
+                self.control
+                and self.control.is_paused(run_id)
+                and state.status == TaskStatus.RUNNING
+            )
+            paused = pause_requested and not inflight
+            message = self._status_message(state, current, paused, inflight)
         elapsed = _elapsed_seconds(state.started_at, state.finished_at)
         progress = (
             min(1.0, tested / state.expected_candidates)
@@ -136,9 +148,9 @@ class RealExecutor:
         return RunStatus(
             task_id=state.task_id,
             run_id=run_id,
-            status=state.status,
+            status=TaskStatus.PAUSED if paused else state.status,
             progress=progress,
-            current_strategy=current,
+            current_strategy=current if not paused else None,
             elapsed_time=elapsed,
             tested=tested,
             recovered=recovered,
@@ -328,6 +340,8 @@ class RealExecutor:
         for state in active:
             if state.thread is not None:
                 state.thread.join(timeout=5)
+        if self.control is not None:
+            self.control.clear_all()
 
     # ------------------------------------------------------------------ 内部
     def _resolve_targets(
@@ -413,6 +427,9 @@ class RealExecutor:
 
     def _execute_strategies(self, state: _RunState) -> None:
         for item in state.strategies:
+            if self._paused_wait_cancelled(state):
+                self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
+                return
             if state.cancel_requested:
                 self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
                 return
@@ -428,6 +445,9 @@ class RealExecutor:
             for batch_index, candidates in enumerate(
                 item.candidate_batches, start=1
             ):
+                if self._paused_wait_cancelled(state):
+                    self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
+                    return
                 if state.cancel_requested:
                     self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
                     return
@@ -581,8 +601,21 @@ class RealExecutor:
                 update_task_status(session, task, state.status)
 
     def _status_message(
-        self, state: _RunState, current: str | None
+        self,
+        state: _RunState,
+        current: str | None,
+        paused: bool = False,
+        inflight: bool = False,
     ) -> str:
+        if paused:
+            return "真实执行已暂停（批次边界），继续后将从下一批候选恢复"
+        if (
+            state.status == TaskStatus.RUNNING
+            and inflight
+            and self.control
+            and self.control.is_paused(state.run_id)
+        ):
+            return "已受理暂停请求，等待当前批次结束后暂停"
         if state.status != TaskStatus.RUNNING:
             if state.status == TaskStatus.CANCELLED:
                 return "真实执行已停止"
@@ -601,6 +634,19 @@ class RealExecutor:
         )
         name = running.strategy_name if running else current
         return f"正在执行策略 {name}（{current}）"
+
+    def _paused_wait_cancelled(self, state: _RunState) -> bool:
+        """在批次边界等待暂停解除；被取消时返回 True，由调用方收尾。"""
+        while True:
+            with self._lock:
+                cancelled = state.cancel_requested
+            if cancelled:
+                return True
+            if not (
+                self.control and self.control.is_paused(state.run_id)
+            ):
+                return False
+            time.sleep(0.1)
 
     def _require(self, run_id: str) -> _RunState:
         with self._lock:

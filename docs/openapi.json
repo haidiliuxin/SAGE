@@ -1494,6 +1494,7 @@
           "analyzed",
           "planned",
           "running",
+          "paused",
           "completed",
           "failed",
           "cancelled"

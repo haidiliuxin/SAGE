@@ -36,6 +36,13 @@ ALLOWED_TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
         TaskStatus.COMPLETED,
         TaskStatus.FAILED,
         TaskStatus.CANCELLED,
+        TaskStatus.PAUSED,
+    },
+    TaskStatus.PAUSED: {
+        TaskStatus.RUNNING,
+        TaskStatus.COMPLETED,
+        TaskStatus.FAILED,
+        TaskStatus.CANCELLED,
     },
     TaskStatus.COMPLETED: set(),
     TaskStatus.FAILED: set(),
@@ -185,3 +192,59 @@ def file_to_schema(item: FileModel) -> FileCreated:
         sha256=item.sha256,
         created_at=item.created_at,
     )
+
+
+def finalize_interrupted_tasks(session_factory) -> int:
+    """服务启动时收尾进程中断残留的执行（异常恢复 v1，幂等）。
+
+    把启动时仍处于 running/paused 的任务与其策略运行行收尾：
+    - 若任务全部策略行都已完成（例如恰好崩在“回写任务终态”之前），
+      仅把任务推进到 completed；
+    - 否则把残留的 running/paused 策略行置为 failed，任务置为 failed，
+      避免状态悬挂在 running/paused 上无法推进。
+
+    返回处理的任务数。运行期断点续跑（暂停在批次间的继续、执行中途恢复）
+    依赖进程内存中的候选批次状态，由后续版本结合乙的调度器持久化实现。
+    """
+    from sqlalchemy import select
+
+    from .models import StrategyRunModel
+
+    processed = 0
+    with session_factory() as session:
+        tasks = list(
+            session.scalars(
+                select(TaskModel).where(
+                    TaskModel.status.in_(
+                        (TaskStatus.RUNNING.value, TaskStatus.PAUSED.value)
+                    )
+                )
+            )
+        )
+        for task in tasks:
+            rows = list(
+                session.scalars(
+                    select(StrategyRunModel).where(
+                        StrategyRunModel.task_id == task.task_id
+                    )
+                )
+            )
+            pending = [
+                row
+                for row in rows
+                if row.status
+                in (TaskStatus.RUNNING.value, TaskStatus.PAUSED.value)
+            ]
+            timestamp = now_iso()
+            if rows and not pending:
+                task.status = TaskStatus.COMPLETED.value
+            else:
+                for row in pending:
+                    row.status = TaskStatus.FAILED.value
+                    row.finished_at = timestamp
+                task.status = TaskStatus.FAILED.value
+            task.updated_at = timestamp
+            processed += 1
+        if processed:
+            session.commit()
+    return processed
