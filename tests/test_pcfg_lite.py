@@ -40,4 +40,3 @@ def test_structure_length_and_lazy_candidate_control():
         max_structure_length=4,
     ), 10))
     assert [item.value for item in records] == ["ok"]
-
