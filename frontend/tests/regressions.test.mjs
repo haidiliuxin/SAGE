@@ -90,7 +90,12 @@ function remoteFlow(strategyIds = ['S1'], overrides = {}) {
       execution = JSON.parse(init.body)
       data = { task_id: taskId, run_id: runId, status: 'running', started_at: new Date().toISOString() }
     }
-    else if (url.endsWith('/status')) data = { task_id: taskId, run_id: runId, status: 'completed', progress: 1, current_strategy: null, elapsed_time: 2, tested: 123, recovered: 2, message: 'done' }
+    else if (url === `/api/runs/${runId}/status`) data = overrides.status
+      ? await overrides.status()
+      : { task_id: taskId, run_id: runId, status: 'completed', progress: 1, current_strategy: null, elapsed_time: 2, tested: 123, recovered: 2, message: 'done' }
+    else if (url === `/api/tasks/${taskId}/status`) data = overrides.taskStatus
+      ? await overrides.taskStatus(JSON.parse(init.body).status)
+      : { task_id: taskId, status: JSON.parse(init.body).status, created_at: new Date().toISOString() }
     else if (url.endsWith('/result')) data = {
       task_id: taskId, run_id: runId, status: 'completed', total_time: 2,
       total_tested: 123, total_recovered: 2, finished_at: new Date().toISOString(),
@@ -198,4 +203,74 @@ test('workspace renders backend PRIR, rule plan budgets, parameters and warnings
   assert.match(pageText, /默认参数/)
   assert.match(pageText, /分析器降级提示/)
   assert.match(pageText, /慢 Hash 采用高概率小候选集/)
+})
+
+test('workspace distinguishes a pause request from a completed batch-boundary pause', async (t) => {
+  let resolveFirstStatus
+  let resolveSecondStatus
+  const firstStatus = new Promise((resolve) => { resolveFirstStatus = resolve })
+  const secondStatus = new Promise((resolve) => { resolveSecondStatus = resolve })
+  let statusCall = 0
+  const remote = remoteFlow(['S1'], {
+    status: () => (++statusCall === 1 ? firstStatus : secondStatus),
+    taskStatus: (status) => ({ task_id: 'T-TEST', status, created_at: new Date().toISOString() }),
+  })
+  const form = await openForm(t, remote.handler)
+  let flow
+  await act(async () => {
+    flow = form.renderer.root.findByType('form').props.onSubmit({ preventDefault() {} })
+    await new Promise(setImmediate)
+  })
+
+  const button = (label) => form.renderer.root.findAllByType('button').find((node) => text(node).trim() === label)
+  assert.ok(button('批次后暂停'))
+  await act(async () => button('批次后暂停').props.onClick())
+  assert.match(text(form.renderer.root), /等待当前批次结束/)
+  assert.match(text(form.renderer.root), /当前批次会继续执行，之后停止提交新批次/)
+
+  await act(async () => {
+    resolveFirstStatus({ task_id: 'T-TEST', run_id: 'R-TEST', status: 'paused', progress: 0.5, current_strategy: null, elapsed_time: 1, tested: 50, recovered: 0, message: 'paused' })
+    await new Promise(setImmediate)
+  })
+  assert.match(text(form.renderer.root), /已暂停/)
+  assert.ok(button('继续'))
+
+  await act(async () => {
+    resolveSecondStatus({ task_id: 'T-TEST', run_id: 'R-TEST', status: 'completed', progress: 1, current_strategy: null, elapsed_time: 2, tested: 123, recovered: 2, message: 'done' })
+    await flow
+  })
+})
+
+test('task list keeps execution controls out of the archive view', async (t) => {
+  const now = new Date().toISOString()
+  const base = (task_id, name, status) => ({
+    task_id, name, status, created_at: now, updated_at: now,
+    target: { type: 'hash', content: '$2b$10$fixture.for.authorized.testing', file_id: null },
+    known_algorithm: null, time_budget: 300, candidate_budget: 100000,
+    context: { keywords: [], years: [], region: null, organization: null, description: null },
+  })
+  const handler = async (url, init) => {
+    if (url === '/health') return Response.json({ status: 'ok' })
+    if (url.startsWith('/api/tasks?')) {
+      return Response.json({
+        items: [
+          base('T-RUN', '正在运行的任务', 'running'),
+          base('T-PAUSE', '已暂停的任务', 'paused'),
+          base('T-DONE', '已完成的任务', 'completed'),
+        ],
+        total: 3, limit: 100, offset: 0,
+      })
+    }
+    throw new Error(`Unexpected URL: ${url}`)
+  }
+
+  const form = await openForm(t, handler)
+  const nav = form.renderer.root.findAllByType('button').find((b) => text(b).trim() === '任务记录')
+  await act(async () => nav.props.onClick())
+
+  const labels = () => form.renderer.root.findAllByType('button').map((b) => text(b).trim())
+  assert.equal(labels().filter((label) => label === '详情').length, 3)
+  assert.ok(!labels().includes('暂停'))
+  assert.ok(!labels().includes('继续'))
+  assert.ok(!labels().includes('取消任务'))
 })
