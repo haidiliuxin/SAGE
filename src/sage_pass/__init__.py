@@ -13,4 +13,5 @@ if sys.version_info < _MINIMUM_PYTHON:
         f"{current}. Recreate .venv with Python 3.11 or 3.12."
     )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
+
