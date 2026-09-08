@@ -21,7 +21,13 @@ from .hashcat_adapter import (
     RecoveredCredential,
     resolve_hashcat_mode,
 )
-from .repository import FileRepository, StrategyRunRepository, TaskRepository
+from .models import RunRecordModel
+from .repository import (
+    FileRepository,
+    RunRecordRepository,
+    StrategyRunRepository,
+    TaskRepository,
+)
 from .run_control import RunControl
 from .scheduler import (
     ArmSpec,
@@ -65,6 +71,7 @@ class _StrategyState:
     handle: HashcatHandle | None = None
     next_batch_index: int = 0
     scheduled_batches: int = 0
+    consumed_batches: int = 0
     time_cost: float = 0.0
 
 
@@ -95,8 +102,8 @@ class RealExecutor:
     后端按计划生成候选批次，由 Bandit Scheduler 在批次边界动态选择策略并
     交给 Hashcat 执行；后台线程负责启动/轮询/回收，对外通过 run registry
     提供 status/result，支持批次边界暂停/继续/取消，并向数据库回写策略运行
-    行与任务终态。运行期状态保存在进程内存中；跨进程续跑留待与调度器联调时
-    一并持久化。
+    行、任务终态与 RunRecordModel 运行记录。运行记录持久化目标、计划、候选
+    批次与逐批进度/统计检查点，服务重启后可自动从断点续跑。
     """
 
     def __init__(
@@ -292,6 +299,28 @@ class RealExecutor:
             for item in strategies
         ]
         StrategyRunRepository(session).add_many(rows)
+
+        snapshot = _serialize_snapshot(
+            plan=plan,
+            payload=payload,
+            targets=targets,
+            hash_mode=hash_mode,
+            batches_by_strategy=batches_by_strategy,
+            expected=expected,
+            total_candidate_budget=task.candidate_budget,
+        )
+        record = RunRecordModel(
+            run_id=run_id,
+            task_id=task.task_id,
+            mode=ExecutionMode.REAL.value,
+            status=TaskStatus.RUNNING.value,
+            started_at=started_at,
+            snapshot=snapshot,
+            progress=_initial_progress(snapshot, started_at),
+            created_at=started_at,
+            updated_at=started_at,
+        )
+        RunRecordRepository(session).add(record)
 
         state = _RunState(
             run_id=run_id,
@@ -530,6 +559,8 @@ class RealExecutor:
                 item.finished_at = now_iso()
                 state.failed_launch = result.message
                 return
+            item.consumed_batches += 1
+            self._checkpoint(state)
             if state.cancel_requested:
                 self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
                 return
@@ -550,6 +581,136 @@ class RealExecutor:
             recovered=recovered,
             duration=result.duration,
         )
+
+    # ------------------------------------------------------------------ 持久化
+    def _checkpoint(self, state: _RunState) -> None:
+        """每个批次完成后写一次进度检查点（崩溃后据此续跑）。"""
+        try:
+            with self.session_factory() as session:
+                record = RunRecordRepository(session).get(state.run_id)
+                if record is None:
+                    return
+                record.progress = _serialize_progress(state)
+                record.status = (
+                    TaskStatus.PAUSED.value
+                    if self.control and self.control.is_paused(state.run_id)
+                    else TaskStatus.RUNNING.value
+                )
+                record.updated_at = now_iso()
+                RunRecordRepository(session).save(record)
+        except Exception as exc:  # pragma: no cover - 检查点失败不应中断执行
+            state.persist_error = f"检查点写库失败：{exc}"
+
+    def _set_record_status(self, state: _RunState, status: str) -> None:
+        try:
+            with self.session_factory() as session:
+                record = RunRecordRepository(session).get(state.run_id)
+                if record is None:
+                    return
+                record.status = status
+                record.updated_at = now_iso()
+                RunRecordRepository(session).save(record)
+        except Exception:  # pragma: no cover - 记录状态失败不阻塞控制流
+            return
+
+    # ------------------------------------------------------------------ 恢复
+    def recover_after_restart(self) -> set[str]:
+        """启动时扫描持久化的 running/paused 真实运行记录并自动续跑。
+
+        返回被续跑的任务 id 集合；无法恢复的记录与对应任务/策略行收尾为
+        failed。Mock 运行没有记录，仍由 service.finalize_interrupted_tasks
+        按原逻辑收尾（调用方需排除本方法返回的任务）。
+        """
+        resumed_task_ids: set[str] = set()
+        with self.session_factory() as session:
+            stale = RunRecordRepository(session).list_stale()
+        for record in stale:
+            try:
+                self._resume_record(
+                    record.run_id,
+                    record.task_id,
+                    record.snapshot,
+                    record.progress,
+                )
+                resumed_task_ids.add(record.task_id)
+            except Exception as exc:
+                self._fail_stale_record(
+                    record.run_id, record.task_id, f"恢复失败：{exc}"
+                )
+        return resumed_task_ids
+
+    def _resume_record(
+        self,
+        run_id: str,
+        task_id: str,
+        snapshot: dict[str, Any],
+        progress: dict[str, Any],
+    ) -> None:
+        strategies = _state_from_snapshot(snapshot, progress)
+        with self.session_factory() as session:
+            existing = StrategyRunRepository(session).list_by_run_id(run_id)
+            if not existing:
+                rows = [_to_run_row(run_id, task_id, item) for item in strategies]
+                StrategyRunRepository(session).add_many(rows)
+            else:
+                record = RunRecordRepository(session).get(run_id)
+                if record is not None:
+                    record.status = TaskStatus.RUNNING.value
+                    record.updated_at = now_iso()
+                    RunRecordRepository(session).save(record)
+        started_at = progress.get("started_at") or now_iso()
+        scheduler = _scheduler_from_snapshot(
+            snapshot, progress, strategies
+        )
+        state = _RunState(
+            run_id=run_id,
+            task_id=task_id,
+            targets=tuple(snapshot.get("targets", ())),
+            hash_mode=int(snapshot.get("hash_mode", 0)),
+            strategies=strategies,
+            started_at=started_at,
+            expected_candidates=int(
+                snapshot.get("expected_candidates", 0)
+            ),
+            scheduler=scheduler,
+        )
+        with self._lock:
+            self._registry[run_id] = state
+            self._task_runs.setdefault(task_id, set()).add(run_id)
+        thread = threading.Thread(
+            target=self._run_worker,
+            args=(run_id,),
+            name=f"sage-real-{run_id}-recover",
+            daemon=True,
+        )
+        state.thread = thread
+        thread.start()
+
+    def _fail_stale_record(self, run_id: str, task_id: str, reason: str) -> None:
+        timestamp = now_iso()
+        with self.session_factory() as session:
+            rows = StrategyRunRepository(session).list_by_run_id(run_id)
+            for row in rows:
+                if row.status in (
+                    TaskStatus.RUNNING.value,
+                    TaskStatus.PAUSED.value,
+                ):
+                    row.status = TaskStatus.FAILED.value
+                    row.finished_at = timestamp
+            StrategyRunRepository(session).save_all(rows)
+            record = RunRecordRepository(session).get(run_id)
+            if record is not None:
+                record.status = TaskStatus.FAILED.value
+                record.message = reason
+                record.finished_at = timestamp
+                record.updated_at = timestamp
+                RunRecordRepository(session).save(record)
+            task = TaskRepository(session).get(task_id)
+            if task is not None and TaskStatus(task.status) in (
+                TaskStatus.RUNNING,
+                TaskStatus.PAUSED,
+            ):
+                update_task_status(session, task, TaskStatus.FAILED)
 
     def _complete_scheduled_execution(
         self,
@@ -652,11 +813,21 @@ class RealExecutor:
                 row.finished_at = item.finished_at or row.finished_at
             StrategyRunRepository(session).save_all(rows)
             task = TaskRepository(session).get(state.task_id)
-            if task is None:
-                return
-            current = TaskStatus(task.status)
-            if current == TaskStatus.RUNNING and state.status != TaskStatus.RUNNING:
-                update_task_status(session, task, state.status)
+            if task is not None:
+                current = TaskStatus(task.status)
+                if (
+                    current == TaskStatus.RUNNING
+                    and state.status != TaskStatus.RUNNING
+                ):
+                    update_task_status(session, task, state.status)
+            record = RunRecordRepository(session).get(state.run_id)
+            if record is not None:
+                record.status = state.status.value
+                record.message = state.message
+                record.finished_at = state.finished_at or now_iso()
+                record.progress = _serialize_progress(state)
+                record.updated_at = now_iso()
+                RunRecordRepository(session).save(record)
 
     def _status_message(
         self,
@@ -695,14 +866,22 @@ class RealExecutor:
 
     def _paused_wait_cancelled(self, state: _RunState) -> bool:
         """在批次边界等待暂停解除；被取消时返回 True，由调用方收尾。"""
+        persisted_paused = False
         while True:
             with self._lock:
                 cancelled = state.cancel_requested
             if cancelled:
                 return True
-            if not (
+            paused = bool(
                 self.control and self.control.is_paused(state.run_id)
-            ):
+            )
+            if paused != persisted_paused:
+                self._set_record_status(
+                    state,
+                    TaskStatus.PAUSED.value if paused else TaskStatus.RUNNING.value,
+                )
+                persisted_paused = paused
+            if not paused:
                 return False
             time.sleep(0.1)
 
@@ -732,6 +911,169 @@ class RealExecutor:
         for handle in handles:
             handle.stop()
         return True
+
+
+def _serialize_snapshot(
+    *,
+    plan: StrategyPlan,
+    payload: ExecutionRequest,
+    targets: tuple[str, ...],
+    hash_mode: int,
+    batches_by_strategy: dict[str, list[CandidateBatch]],
+    expected: int,
+    total_candidate_budget: int,
+) -> dict[str, Any]:
+    """启动时写入运行记录的静态快照（目标、计划、候选批次等）。"""
+    return {
+        "targets": list(targets),
+        "hash_mode": hash_mode,
+        "expected_candidates": expected,
+        "timeout_override": payload.timeout,
+        "plan": {
+            "total_time_budget": plan.total_time_budget,
+            "total_candidate_budget": total_candidate_budget,
+            "strategies": [
+                {
+                    "strategy_id": strategy.strategy_id.value,
+                    "strategy_name": strategy.strategy_name,
+                    "priority": strategy.priority,
+                    "time_budget": strategy.time_budget,
+                    "candidate_budget": strategy.candidate_budget,
+                    "parameters": dict(strategy.parameters),
+                }
+                for strategy in plan.strategies
+            ],
+        },
+        "batches": {
+            strategy_id: [
+                list(batch.candidates) for batch in batches
+            ]
+            for strategy_id, batches in batches_by_strategy.items()
+        },
+    }
+
+
+def _initial_progress(
+    snapshot: dict[str, Any], started_at: str
+) -> dict[str, Any]:
+    return {
+        "started_at": started_at,
+        "expected_candidates": int(snapshot.get("expected_candidates", 0)),
+        "strategies": {
+            entry["strategy_id"]: {
+                "consumed": 0,
+                "tested": 0,
+                "recovered": 0,
+                "time_cost": 0.0,
+                "recovered_items": [],
+            }
+            for entry in snapshot["plan"]["strategies"]
+        },
+        "scheduler_stats": {},
+    }
+
+
+def _serialize_progress(state: _RunState) -> dict[str, Any]:
+    scheduler_stats: dict[str, Any] = {}
+    if state.scheduler is not None:
+        scheduler_stats = state.scheduler.snapshot_statistics()
+    return {
+        "started_at": state.started_at,
+        "expected_candidates": state.expected_candidates,
+        "strategies": {
+            item.strategy_id: {
+                "consumed": item.consumed_batches,
+                "tested": item.tested,
+                "recovered": item.recovered,
+                "time_cost": item.time_cost,
+                "recovered_items": [
+                    [credential.target, credential.plaintext]
+                    for credential in item.recovered_items
+                ],
+            }
+            for item in state.strategies
+        },
+        "scheduler_stats": scheduler_stats,
+    }
+
+
+def _state_from_snapshot(
+    snapshot: dict[str, Any], progress: dict[str, Any]
+) -> list[_StrategyState]:
+    """按持久化快照重建策略状态；已消费批次之前的内容不再执行。"""
+    entries = snapshot["plan"]["strategies"]
+    batches = snapshot.get("batches", {})
+    strategy_progress = progress.get("strategies", {})
+    states: list[_StrategyState] = []
+    for entry in entries:
+        strategy_id = entry["strategy_id"]
+        item_progress = strategy_progress.get(strategy_id, {})
+        consumed = int(item_progress.get("consumed", 0))
+        all_batches = batches.get(strategy_id, [])
+        remaining = tuple(
+            tuple(candidates) for candidates in all_batches[consumed:]
+        )
+        recovered_items = [
+            RecoveredCredential(target=target, plaintext=plaintext)
+            for target, plaintext in item_progress.get(
+                "recovered_items", []
+            )
+        ]
+        states.append(
+            _StrategyState(
+                strategy_id=strategy_id,
+                strategy_name=entry.get("strategy_name", strategy_id),
+                priority=entry["priority"],
+                time_budget=entry["time_budget"],
+                candidate_budget=entry["candidate_budget"],
+                parameters=dict(entry.get("parameters", {})),
+                candidate_batches=remaining,
+                tested=int(item_progress.get("tested", 0)),
+                recovered=len(recovered_items),
+                recovered_items=recovered_items,
+                time_cost=float(item_progress.get("time_cost", 0.0)),
+                consumed_batches=consumed,
+                scheduled_batches=consumed,
+            )
+        )
+    return states
+
+
+def _scheduler_from_snapshot(
+    snapshot: dict[str, Any],
+    progress: dict[str, Any],
+    strategies: list[_StrategyState],
+) -> BanditScheduler:
+    timeout = snapshot.get("timeout_override")
+    arms = [
+        ArmSpec(
+            strategy_id=item.strategy_id,
+            priority=item.priority,
+            candidate_budget=item.candidate_budget,
+            time_budget=float(
+                max(
+                    1,
+                    timeout if timeout is not None else item.time_budget,
+                )
+            ),
+        )
+        for item in strategies
+    ]
+    plan_meta = snapshot["plan"]
+    scheduler = BanditScheduler(
+        arms,
+        total_candidate_budget=int(
+            plan_meta.get(
+                "total_candidate_budget",
+                sum(item.candidate_budget for item in arms),
+            )
+        ),
+        total_time_budget=float(plan_meta["total_time_budget"]),
+    )
+    stats = progress.get("scheduler_stats") or {}
+    if stats:
+        scheduler.restore_statistics(stats)
+    return scheduler
 
 
 def _to_run_row(run_id: str, task_id: str, item: _StrategyState) -> Any:
