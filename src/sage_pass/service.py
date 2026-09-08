@@ -194,22 +194,26 @@ def file_to_schema(item: FileModel) -> FileCreated:
     )
 
 
-def finalize_interrupted_tasks(session_factory) -> int:
-    """服务启动时收尾进程中断残留的执行（异常恢复 v1，幂等）。
+def finalize_interrupted_tasks(
+    session_factory, *, exclude_task_ids: set[str] | None = None
+) -> int:
+    """服务启动时收尾进程中断残留的执行（幂等）。
 
-    把启动时仍处于 running/paused 的任务与其策略运行行收尾：
+    处理仍处于 running/paused 的任务与其策略运行行（Mock 运行以及没有
+    RunRecordModel 的旧版真实运行）：
     - 若任务全部策略行都已完成（例如恰好崩在“回写任务终态”之前），
       仅把任务推进到 completed；
     - 否则把残留的 running/paused 策略行置为 failed，任务置为 failed，
       避免状态悬挂在 running/paused 上无法推进。
 
-    返回处理的任务数。运行期断点续跑（暂停在批次间的继续、执行中途恢复）
-    依赖进程内存中的候选批次状态，由后续版本结合乙的调度器持久化实现。
+    exclude_task_ids：真实运行已由 RealExecutor.recover_after_restart()
+    自动续跑的任务，跳过不处理。返回处理的任务数。
     """
     from sqlalchemy import select
 
     from .models import StrategyRunModel
 
+    excluded = exclude_task_ids or set()
     processed = 0
     with session_factory() as session:
         tasks = list(
@@ -222,6 +226,8 @@ def finalize_interrupted_tasks(session_factory) -> int:
             )
         )
         for task in tasks:
+            if task.task_id in excluded:
+                continue
             rows = list(
                 session.scalars(
                     select(StrategyRunModel).where(

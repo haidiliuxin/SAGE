@@ -3,7 +3,13 @@ from __future__ import annotations
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .models import FileModel, PRIRModel, StrategyRunModel, TaskModel
+from .models import (
+    FileModel,
+    PRIRModel,
+    RunRecordModel,
+    StrategyRunModel,
+    TaskModel,
+)
 
 
 class TaskRepository:
@@ -110,3 +116,34 @@ class StrategyRunRepository:
         for item in items:
             self.session.refresh(item)
         return items
+
+
+class RunRecordRepository:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def get(self, run_id: str) -> RunRecordModel | None:
+        return self.session.scalar(
+            select(RunRecordModel).where(RunRecordModel.run_id == run_id)
+        )
+
+    def list_stale(self) -> list[RunRecordModel]:
+        """返回上次中断、需要重启恢复的记录（running/paused）。"""
+        return list(
+            self.session.scalars(
+                select(RunRecordModel)
+                .where(RunRecordModel.status.in_(("running", "paused")))
+                .order_by(RunRecordModel.id.asc())
+            )
+        )
+
+    def add(self, item: RunRecordModel) -> RunRecordModel:
+        self.session.add(item)
+        self.session.commit()
+        self.session.refresh(item)
+        return item
+
+    def save(self, item: RunRecordModel) -> RunRecordModel:
+        self.session.commit()
+        self.session.refresh(item)
+        return item

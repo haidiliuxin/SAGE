@@ -138,6 +138,35 @@ class BanditScheduler:
     def statistics(self, strategy_id: str) -> ArmStatistics:
         return replace(self._require_statistics(strategy_id))
 
+    def snapshot_statistics(self) -> dict[str, dict[str, object]]:
+        """导出全部 Arm 统计（检查点持久化用）。"""
+        return {
+            strategy_id: {
+                "tested": stats.tested,
+                "recovered": stats.recovered,
+                "time_cost": stats.time_cost,
+                "recent_gain": stats.recent_gain,
+                "pulls": stats.pulls,
+                "allocated_candidates": stats.allocated_candidates,
+            }
+            for strategy_id, stats in self._statistics.items()
+        }
+
+    def restore_statistics(
+        self, snapshot: Mapping[str, Mapping[str, object]]
+    ) -> None:
+        """把持久化的 Arm 统计恢复到调度器（重启续跑用）。"""
+        for strategy_id, values in snapshot.items():
+            stats = self._require_statistics(strategy_id)
+            stats.tested = int(values.get("tested", 0))
+            stats.recovered = int(values.get("recovered", 0))
+            stats.time_cost = float(values.get("time_cost", 0.0))
+            stats.recent_gain = float(values.get("recent_gain", 0.0))
+            stats.pulls = int(values.get("pulls", 0))
+            stats.allocated_candidates = int(
+                values.get("allocated_candidates", 0)
+            )
+
     def score(self, strategy_id: str, next_batch_size: int) -> ScoreBreakdown:
         if next_batch_size <= 0:
             raise ValueError("next_batch_size must be positive")

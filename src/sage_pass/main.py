@@ -30,8 +30,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(application: FastAPI):
         resolved.upload_dir.mkdir(parents=True, exist_ok=True)
         database.create_all()
-        # 异常恢复：把上次进程中断残留的 running/paused 任务收尾，避免悬挂。
-        finalize_interrupted_tasks(database.session_factory)
         control = RunControl()
         application.state.run_control = control
         application.state.zip_extractor = ZipHashExtractor(
@@ -42,6 +40,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             settings=resolved,
             zip_extractor=application.state.zip_extractor,
             control=control,
+        )
+        # 异常恢复：真实运行按持久化检查点自动续跑；其余残留任务收尾避免悬挂。
+        resumed = application.state.real_executor.recover_after_restart()
+        finalize_interrupted_tasks(
+            database.session_factory, exclude_task_ids=resumed
         )
         application.state.planner = build_planner(resolved)
         yield

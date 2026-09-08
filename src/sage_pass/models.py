@@ -96,3 +96,27 @@ class FileModel(Base):
     created_at: Mapped[str] = mapped_column(String(40))
 
     tasks: Mapped[list[TaskModel]] = relationship(back_populates="file")
+
+
+class RunRecordModel(Base):
+    """真实执行的持久化运行记录（第 3 周甲后半：状态持久化与断点续跑）。
+
+    snapshot 保存启动时一次性写入的大块内容（目标、计划、候选批次等）；
+    progress 保存随批次推进高频更新的小状态（各策略游标、已测/已恢复与
+    Bandit 统计）。服务重启后根据这两个字段重建运行状态并自动续跑。
+    """
+
+    __tablename__ = "run_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    task_id: Mapped[str] = mapped_column(String(32), index=True)
+    mode: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(20), index=True)
+    started_at: Mapped[str] = mapped_column(String(40))
+    finished_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    progress: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[str] = mapped_column(String(40))
+    updated_at: Mapped[str] = mapped_column(String(40))
