@@ -23,6 +23,11 @@ from .hashcat_adapter import (
 )
 from .repository import FileRepository, StrategyRunRepository, TaskRepository
 from .run_control import RunControl
+from .scheduler import (
+    ArmSpec,
+    BanditScheduler,
+    SchedulerStopReason,
+)
 from .schemas import (
     ExecutionRequest,
     ExecutionStarted,
@@ -58,6 +63,9 @@ class _StrategyState:
     message: str = ""
     exit_code: int | None = None
     handle: HashcatHandle | None = None
+    next_batch_index: int = 0
+    scheduled_batches: int = 0
+    time_cost: float = 0.0
 
 
 @dataclass
@@ -72,21 +80,23 @@ class _RunState:
     finished_at: str | None = None
     message: str = ""
     expected_candidates: int = 0
-    timeout_override: int | None = None
     cancel_requested: bool = False
     finished: bool = False
     failed_launch: str | None = None
     persist_error: str | None = None
     thread: threading.Thread | None = None
+    scheduler: BanditScheduler | None = None
+    current_strategy_id: str | None = None
 
 
 class RealExecutor:
     """基于 Hashcat 的真实执行器。
 
-    后端按计划生成候选批次，并在每个策略的共享时间预算内依次交给 Hashcat
-    执行；后台线程负责启动/轮询/回收，对外通过 run registry 提供
-    status/result，并向数据库回写策略运行行与任务终态。运行状态保存在进程
-    内存中（第二周范围），持久化与异常恢复属于第三周任务。
+    后端按计划生成候选批次，由 Bandit Scheduler 在批次边界动态选择策略并
+    交给 Hashcat 执行；后台线程负责启动/轮询/回收，对外通过 run registry
+    提供 status/result，支持批次边界暂停/继续/取消，并向数据库回写策略运行
+    行与任务终态。运行期状态保存在进程内存中；跨进程续跑留待与调度器联调时
+    一并持久化。
     """
 
     def __init__(
@@ -121,14 +131,7 @@ class RealExecutor:
         with self._lock:
             tested = sum(item.tested for item in state.strategies)
             recovered = sum(item.recovered for item in state.strategies)
-            current = next(
-                (
-                    item.strategy_id
-                    for item in state.strategies
-                    if item.status == TaskStatus.RUNNING.value
-                ),
-                None,
-            )
+            current = state.current_strategy_id
             inflight = any(
                 item.handle is not None for item in state.strategies
             )
@@ -140,7 +143,7 @@ class RealExecutor:
             paused = pause_requested and not inflight
             message = self._status_message(state, current, paused, inflight)
         elapsed = _elapsed_seconds(state.started_at, state.finished_at)
-        progress = (
+        progress = 1.0 if state.finished else (
             min(1.0, tested / state.expected_candidates)
             if state.expected_candidates > 0
             else 1.0
@@ -298,7 +301,26 @@ class RealExecutor:
             strategies=strategies,
             started_at=started_at,
             expected_candidates=expected,
-            timeout_override=payload.timeout,
+            scheduler=BanditScheduler(
+                [
+                    ArmSpec(
+                        strategy_id=item.strategy_id,
+                        priority=item.priority,
+                        candidate_budget=item.candidate_budget,
+                        time_budget=float(
+                            max(
+                                1,
+                                payload.timeout
+                                if payload.timeout is not None
+                                else item.time_budget,
+                            )
+                        ),
+                    )
+                    for item in strategies
+                ],
+                total_candidate_budget=task.candidate_budget,
+                total_time_budget=float(plan.total_time_budget),
+            ),
         )
         with self._lock:
             self._registry[run_id] = state
@@ -426,92 +448,131 @@ class RealExecutor:
                 state.persist_error = f"回写数据库失败：{exc}"
 
     def _execute_strategies(self, state: _RunState) -> None:
-        for item in state.strategies:
+        scheduler = state.scheduler
+        if scheduler is None:  # pragma: no cover - start() always installs one
+            raise RuntimeError("Bandit scheduler is unavailable")
+        by_strategy = {item.strategy_id: item for item in state.strategies}
+
+        while True:
             if self._paused_wait_cancelled(state):
                 self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
                 return
             if state.cancel_requested:
                 self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
                 return
-            if not item.candidate_batches:
-                item.started_at = now_iso()
-                item.status = TaskStatus.COMPLETED.value
-                item.tested = 0
-                item.finished_at = now_iso()
-                item.message = "该策略未生成候选，无需执行"
-                continue
-            item.started_at = now_iso()
-            deadline = time.monotonic() + self._strategy_runtime(state, item)
-            for batch_index, candidates in enumerate(
-                item.candidate_batches, start=1
-            ):
-                if self._paused_wait_cancelled(state):
-                    self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
-                    return
-                if state.cancel_requested:
-                    self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
-                    return
-                remaining_time = deadline - time.monotonic()
-                if remaining_time <= 0:
-                    item.message = "已达到策略时间预算"
-                    break
-                try:
-                    handle = self.hashcat.start(
-                        HashcatJob(
-                            run_id=(
-                                f"{state.run_id}-{item.strategy_id}-{batch_index}"
-                            ),
-                            target_hashes=state.targets,
-                            hash_mode=state.hash_mode,
-                            candidates=candidates,
-                            timeout_seconds=remaining_time,
-                            candidate_budget=len(candidates),
-                        )
+            next_batch_sizes = _next_batch_sizes(state.strategies)
+            decision = scheduler.select(next_batch_sizes)
+            if decision is None:
+                self._complete_scheduled_execution(
+                    state, scheduler.stop_reason(next_batch_sizes)
+                )
+                state.failed_launch = ""
+                return
+
+            item = by_strategy[decision.strategy_id]
+            source_batch = item.candidate_batches[item.next_batch_index]
+            candidates = source_batch[: decision.candidate_limit]
+            item.next_batch_index += 1
+            item.scheduled_batches += 1
+            item.started_at = item.started_at or now_iso()
+            with self._lock:
+                state.current_strategy_id = item.strategy_id
+            try:
+                handle = self.hashcat.start(
+                    HashcatJob(
+                        run_id=(
+                            f"{state.run_id}-{item.strategy_id}-"
+                            f"{item.scheduled_batches}"
+                        ),
+                        target_hashes=state.targets,
+                        hash_mode=state.hash_mode,
+                        candidates=candidates,
+                        timeout_seconds=decision.time_limit,
+                        candidate_budget=len(candidates),
                     )
-                except AppError as exc:
-                    item.status = TaskStatus.FAILED.value
-                    item.finished_at = now_iso()
-                    item.message = exc.message
-                    state.failed_launch = exc.message
-                    return
-                item.handle = handle
+                )
+            except AppError as exc:
                 with self._lock:
-                    cancel_requested = state.cancel_requested
-                if cancel_requested:
-                    # 启动与取消几乎同时发生时，立即停止刚启动的进程。
-                    result = handle.stop()
-                    item.handle = None
-                    self._accumulate_result(item, result)
-                    self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
-                    return
-                try:
-                    result = handle.wait()
-                except Exception as exc:  # pragma: no cover - wait 失败按执行失败处理
-                    item.status = TaskStatus.FAILED.value
-                    item.finished_at = now_iso()
-                    item.message = f"等待 Hashcat 失败：{exc}"
-                    state.failed_launch = item.message
-                    return
-                finally:
-                    item.handle = None
-                self._accumulate_result(item, result)
-                if result.status == TaskStatus.FAILED:
-                    item.status = TaskStatus.FAILED.value
-                    item.finished_at = now_iso()
-                    state.failed_launch = result.message
-                    return
-                if state.cancel_requested:
-                    self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
-                    return
+                    state.current_strategy_id = None
+                item.status = TaskStatus.FAILED.value
+                item.finished_at = now_iso()
+                item.message = exc.message
+                state.failed_launch = exc.message
+                return
+            item.handle = handle
+            with self._lock:
+                cancel_requested = state.cancel_requested
+            if cancel_requested:
+                result = handle.stop()
+                item.handle = None
+                with self._lock:
+                    state.current_strategy_id = None
+                self._record_batch_result(
+                    scheduler, item, candidates, result
+                )
+                self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
+                return
+            try:
+                result = handle.wait()
+            except Exception as exc:  # pragma: no cover - wait 失败按执行失败处理
+                item.status = TaskStatus.FAILED.value
+                item.finished_at = now_iso()
+                item.message = f"等待 Hashcat 失败：{exc}"
+                state.failed_launch = item.message
+                return
+            finally:
+                item.handle = None
+                with self._lock:
+                    state.current_strategy_id = None
+            self._record_batch_result(scheduler, item, candidates, result)
+            if result.status == TaskStatus.FAILED:
+                item.status = TaskStatus.FAILED.value
+                item.finished_at = now_iso()
+                state.failed_launch = result.message
+                return
+            if state.cancel_requested:
+                self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
+                return
+
+    def _record_batch_result(
+        self,
+        scheduler: BanditScheduler,
+        item: _StrategyState,
+        candidates: tuple[str, ...],
+        result: HashcatResult,
+    ) -> None:
+        recovered = self._accumulate_result(item, result)
+        item.time_cost += result.duration
+        scheduler.observe(
+            item.strategy_id,
+            candidate_count=len(candidates),
+            tested=result.tested,
+            recovered=recovered,
+            duration=result.duration,
+        )
+
+    def _complete_scheduled_execution(
+        self,
+        state: _RunState,
+        reason: SchedulerStopReason | None,
+    ) -> None:
+        finished_at = now_iso()
+        for item in state.strategies:
+            if item.status != TaskStatus.RUNNING.value:
+                continue
             item.status = TaskStatus.COMPLETED.value
-            item.finished_at = now_iso()
-            if "时间预算" not in item.message:
+            item.finished_at = finished_at
+            if not item.candidate_batches:
+                item.message = "该策略未生成候选，无需执行"
+            elif reason == SchedulerStopReason.TIME_BUDGET:
+                item.message = "已达到任务时间预算"
+            elif reason == SchedulerStopReason.CANDIDATE_BUDGET:
+                item.message = "已达到任务候选预算"
+            else:
                 item.message = (
-                    f"策略执行完成，共测试 {item.tested} 个候选，"
+                    f"策略调度结束，共测试 {item.tested} 个候选，"
                     f"恢复 {item.recovered} 项"
                 )
-        if state.failed_launch is None:
-            state.failed_launch = ""
 
     def _skip_remaining(
         self, state: _RunState, status: TaskStatus, message: str
@@ -525,8 +586,9 @@ class RealExecutor:
 
     def _accumulate_result(
         self, item: _StrategyState, result: HashcatResult
-    ) -> None:
+    ) -> int:
         item.tested += result.tested
+        recovered_before = len(item.recovered_items)
         recovered_seen = {
             (credential.target, credential.plaintext)
             for credential in item.recovered_items
@@ -540,11 +602,7 @@ class RealExecutor:
         item.recovered = len(item.recovered_items)
         item.exit_code = result.exit_code
         item.message = result.message
-
-    def _strategy_runtime(self, state: _RunState, item: _StrategyState) -> float:
-        if state.timeout_override is not None:
-            return float(max(1, state.timeout_override))
-        return float(max(1, item.time_budget))
+        return item.recovered - recovered_before
 
     def _finalize_run(self, state: _RunState) -> None:
         with self._lock:
@@ -708,7 +766,17 @@ def _elapsed_seconds(started_at: str | None, finished_at: str | None) -> float:
 
 
 def _strategy_result_time(item: _StrategyState) -> float:
-    if item.started_at is None:
-        return 0.0
-    end = item.finished_at or item.started_at
-    return _elapsed_seconds(item.started_at, end)
+    return item.time_cost
+
+
+def _next_batch_sizes(
+    strategies: list[_StrategyState],
+) -> dict[str, int]:
+    return {
+        item.strategy_id: (
+            len(item.candidate_batches[item.next_batch_index])
+            if item.next_batch_index < len(item.candidate_batches)
+            else 0
+        )
+        for item in strategies
+    }
