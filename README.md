@@ -1,6 +1,6 @@
 # SAGE-Pass
 
-SAGE-Pass 是面向异构离线口令安全评测任务的智能策略编排系统。本仓库当前完成第 1 周后端基础与 Mock 链路、第 2 周真实执行、智能规划和 S1～S4 候选生成，以及第 3 周执行控制和 Bandit 自适应调度：FastAPI 项目、SQLite 持久化、公共数据结构、任务 API、文件接入、PRIR 分析、Mock/Rule/LLM Planner、Mock/Real Executor、Hashcat 适配器、ZIP（WinZip AES）真实接入和候选批次执行。
+SAGE-Pass 是面向异构离线口令安全评测任务的智能策略编排系统。本仓库已完成后端基础与 Mock 链路、真实执行、S1～S5 候选生成、执行控制、Bandit 自适应调度，以及跨任务 Feedback Engine v2：系统从 completed 真实运行中提取抽象口令结构，事务性聚合 Pattern Knowledge，并在后续相关任务中生成 S5 迁移候选。
 
 > Analyzer、Planner 与 Executor 均按团队统一接口实现。Mock 执行用于第一周链路演示；`mode: real` 会调用本机 Hashcat（ZIP 目标还需 zip2john）执行真实恢复，时间/候选预算用尽会自动停止。Planner 支持 OpenAI Responses API 和 OpenAI 兼容的 Chat Completions API（包括硅基流动）。
 
@@ -26,6 +26,14 @@ SAGE-Pass 是面向异构离线口令安全评测任务的智能策略编排系�
 - 执行控制（第 3 周）：分批执行的**暂停/继续/取消**与实时状态（`paused`）；Mock 暂停冻结进度，Real 在候选批次边界暂停、继续后恢复；
 - 持久化与断点续跑（第 3 周甲后）：真实运行以 `RunRecordModel` 落库目标/计划/候选批次与逐批进度/Bandit 统计检查点，服务重启后自动从断点续跑（跳过已消费批次）；其余残留 `running/paused` 任务由启动收尾避免状态悬挂；
 - Bandit Scheduler（第 3 周）：把目标组与策略作为 Arm，先按计划优先级各探索一个候选批次，再根据成功概率、近期收益、计划先验和时间成本评分选择下一批；
+- Feedback Engine v2：completed 真实 run 自动抽取长度、字符类别、结构签名、数字位置、抽象前后缀、大小写、年份和常见替换，以事务和唯一 run 标记幂等聚合跨任务 Pattern Knowledge；
+- S5 Transfer：达到最低观察数和任务数的同作用域模式可作用于当前任务授权种子，生成有界、可解释、稳定去重的迁移候选；历史恢复明文不会写入 Pattern Knowledge，也不会发送给 LLM；
+- 迁移评分：S5 的 `transfer_score` 综合模式置信度、频次、任务覆盖和时效性后传入既有 `ArmSpec`，Bandit 评分公式和首轮探索语义保持不变；
+- 只读知识 API：`GET /api/feedback/patterns` 支持作用域、模式类型、最低置信度和数量过滤，不返回恢复明文、Hash 或文件内容；
+- Feedback Engine v2：提取长度、字符类别、结构签名、数字位置、抽象前后缀、大小写、年份和常见替换；通过 `feedback_runs` 保证重复 finalize 幂等，并在同一事务中更新 Pattern Knowledge；
+- S5 Transfer：只把历史抽象模式应用于当前任务提供的关键词、S1 基线和合法规则种子，不读取或复用历史恢复明文；候选保持惰性、稳定排序、全局去重和来源元数据；
+- 历史评分：S5 的 Pattern Knowledge 频次、任务覆盖、置信度和时效衰减形成 0～1 `transfer_score`，注入现有 `ArmSpec`；Bandit 公式和首轮探索规则保持不变；
+- 只读知识 API：`GET /api/feedback/patterns` 支持按目标类型、算法、模式类型和最低置信度过滤，响应不包含恢复明文、Hash 或文件内容；
 - 自适应预算与停止：Hashcat 每批返回的测试数、恢复数和耗时会更新调度评分；任务总预算、策略预算、时间预算或候选耗尽后停止继续分配；
 - LLM Planner：只向模型发送结构化 PRIR，使用严格 JSON Schema 输出，支持温度、超时、最大输出 token、进程内 TTL/LRU 缓存及异常降级；
 - Policy Validator：在计划进入执行链路前校验策略白名单、目标适用性、双预算、优先级和参数范围；
@@ -101,7 +109,7 @@ SAGE_LLM_MODEL=deepseek-ai/DeepSeek-V4-Flash
 
 适配器与真实执行测试使用可控仿真可执行程序（见 `tests/sim_binaries.py`），不需要本机安装真实 hashcat/zip2john。
 
-接口详情见 [docs/API.md](docs/API.md)，各周交接见 [docs/handoff/week1-A.md](docs/handoff/week1-A.md)、[docs/handoff/week1-B.md](docs/handoff/week1-B.md)、[docs/handoff/week2-A.md](docs/handoff/week2-A.md)、[docs/handoff/week2-B.md](docs/handoff/week2-B.md)、[docs/handoff/week2-C-llm-planner.md](docs/handoff/week2-C-llm-planner.md)、[docs/handoff/week3-A.md](docs/handoff/week3-A.md) 与 [docs/handoff/week3-B.md](docs/handoff/week3-B.md)。
+接口详情见 [docs/API.md](docs/API.md)，各周交接见 [docs/handoff/week1-A.md](docs/handoff/week1-A.md)、[docs/handoff/week1-B.md](docs/handoff/week1-B.md)、[docs/handoff/week2-A.md](docs/handoff/week2-A.md)、[docs/handoff/week2-B.md](docs/handoff/week2-B.md)、[docs/handoff/week2-C-llm-planner.md](docs/handoff/week2-C-llm-planner.md)、[docs/handoff/week3-A.md](docs/handoff/week3-A.md)、[docs/handoff/week3-B.md](docs/handoff/week3-B.md) 与 [docs/handoff/feedback-engine-v2.md](docs/handoff/feedback-engine-v2.md)。
 
 ## 目录
 
@@ -115,7 +123,10 @@ src/sage_pass/
   candidate_types.py  候选值与来源元数据
   pcfg_lite.py        S3 有限概率模板及惰性展开
   context.py          S4 规范化、拼音、缩写与上下文组合
-  candidate_generator.py  S1～S4 候选生成、去重、预算与批次输出
+  candidate_generator.py  S1～S5 候选生成、去重、预算与批次输出
+  patterns.py        确定性口令结构抽取（仅产生抽象特征）
+  feedback.py        completed real run 的事务聚合与幂等处理
+  transfer.py        S5 候选生成、知识摘要、时效评分
   scheduler.py       Bandit 批次调度、评分、探索与停止条件
   executor.py        Mock Executor
   real_executor.py   Real Executor：Bandit 选批、候选执行、策略统计与运行态

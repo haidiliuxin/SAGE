@@ -51,7 +51,7 @@ class RunControl:
             entry = self._pauses.get(run_id)
             return entry is not None and entry[1] is not None
 
-    def offset_seconds(self, run_id: str) -> float:
+    def offset_seconds(self, run_id: str, *, now: float | None = None) -> float:
         """应从未暂停总耗时中扣除的秒数（暂停期间仍持续累计以冻结进度）。"""
         with self._lock:
             entry = self._pauses.get(run_id)
@@ -60,7 +60,8 @@ class RunControl:
             acc, since = entry
             if since is None:
                 return acc
-            return acc + max(0.0, time.time() - since)
+            current = time.time() if now is None else now
+            return acc + max(0.0, current - since)
 
     def clear(self, run_id: str) -> None:
         with self._lock:

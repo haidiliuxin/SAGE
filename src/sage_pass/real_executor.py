@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -13,6 +14,7 @@ from .candidate_types import CandidateRecord
 from .config import Settings
 from .enums import ExecutionMode, TargetType, TaskStatus
 from .errors import AppError
+from .feedback import FeedbackConfig, FeedbackService
 from .hashcat_adapter import (
     HashcatAdapter,
     HashcatHandle,
@@ -24,6 +26,8 @@ from .hashcat_adapter import (
 from .models import RunRecordModel
 from .repository import (
     FileRepository,
+    PRIRRepository,
+    PatternKnowledgeRepository,
     RunRecordRepository,
     StrategyRunRepository,
     TaskRepository,
@@ -46,8 +50,10 @@ from .schemas import (
 )
 from .service import now_iso, public_id, update_task_status
 from .zip_adapter import ZipHashExtractor
+from .transfer import load_transfer_knowledge
 
 ZIP_EXTRACTION_TIMEOUT = 30.0
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -73,6 +79,7 @@ class _StrategyState:
     scheduled_batches: int = 0
     consumed_batches: int = 0
     time_cost: float = 0.0
+    transfer_score: float | None = None
 
 
 @dataclass
@@ -124,6 +131,15 @@ class RealExecutor:
         )
         self.candidate_generator = candidate_generator or CandidateGenerator()
         self.control = control
+        self.feedback_config = FeedbackConfig(
+            minimum_observations=settings.feedback_minimum_observations,
+            minimum_tasks=settings.feedback_minimum_tasks,
+            maximum_patterns_per_scope=settings.feedback_maximum_patterns_per_scope,
+            recency_half_life_days=settings.feedback_recency_half_life_days,
+        )
+        self.feedback_service = FeedbackService(
+            session_factory, config=self.feedback_config
+        )
         self._registry: dict[str, _RunState] = {}
         self._task_runs: dict[str, set[str]] = {}
         self._lock = threading.RLock()
@@ -248,11 +264,20 @@ class RealExecutor:
         started_at = now_iso()
         run_id = public_id("R")
         batches_by_strategy: dict[str, list[CandidateBatch]] = {}
+        prir_model = PRIRRepository(session).get(task.task_id)
+        transfer_patterns, knowledge_summary = load_transfer_knowledge(
+            PatternKnowledgeRepository(session),
+            target_type=task.target.type.value,
+            algorithm=prir_model.algorithm if prir_model is not None else "unknown",
+            candidate_budget=task.candidate_budget,
+            config=self.feedback_config,
+        )
         try:
             for batch in self.candidate_generator.iter_plan_batches(
                 plan,
                 supplied_candidates=payload.candidates,
                 task_context=task.context,
+                transfer_patterns=transfer_patterns,
             ):
                 batches_by_strategy.setdefault(
                     batch.strategy_id.value, []
@@ -285,6 +310,11 @@ class RealExecutor:
                     parameters=item.parameters,
                     candidate_batches=candidate_batches,
                     candidate_record_batches=candidate_record_batches,
+                    transfer_score=(
+                        knowledge_summary.transfer_score
+                        if item.strategy_id.value == "S5"
+                        else None
+                    ),
                 )
             )
         if expected == 0:
@@ -308,6 +338,9 @@ class RealExecutor:
             batches_by_strategy=batches_by_strategy,
             expected=expected,
             total_candidate_budget=task.candidate_budget,
+            transfer_scores={
+                item.strategy_id: item.transfer_score for item in strategies
+            },
         )
         record = RunRecordModel(
             run_id=run_id,
@@ -344,6 +377,7 @@ class RealExecutor:
                                 else item.time_budget,
                             )
                         ),
+                        transfer_score=item.transfer_score,
                     )
                     for item in strategies
                 ],
@@ -471,10 +505,35 @@ class RealExecutor:
             state.failed_launch = f"内部错误：{exc}"
         finally:
             self._finalize_run(state)
+            persisted = False
             try:
                 self._persist(state)
+                persisted = True
             except Exception as exc:  # pragma: no cover - 回写失败不阻塞结果返回
                 state.persist_error = f"回写数据库失败：{exc}"
+            if persisted and state.status == TaskStatus.COMPLETED:
+                try:
+                    recovered = [
+                        credential
+                        for strategy in state.strategies
+                        for credential in strategy.recovered_items
+                    ]
+                    self.feedback_service.process_completed_run(
+                        run_id=state.run_id,
+                        task_id=state.task_id,
+                        recovered_items=recovered,
+                    )
+                except Exception as exc:  # feedback never changes run outcome
+                    state.persist_error = (
+                        "Feedback 处理失败（不影响评测结果）："
+                        f"{type(exc).__name__}"
+                    )
+                    LOGGER.error(
+                        "feedback processing failed for run_id=%s task_id=%s type=%s",
+                        state.run_id,
+                        state.task_id,
+                        type(exc).__name__,
+                    )
 
     def _execute_strategies(self, state: _RunState) -> None:
         scheduler = state.scheduler
@@ -922,6 +981,7 @@ def _serialize_snapshot(
     batches_by_strategy: dict[str, list[CandidateBatch]],
     expected: int,
     total_candidate_budget: int,
+    transfer_scores: dict[str, float | None] | None = None,
 ) -> dict[str, Any]:
     """启动时写入运行记录的静态快照（目标、计划、候选批次等）。"""
     return {
@@ -940,6 +1000,9 @@ def _serialize_snapshot(
                     "time_budget": strategy.time_budget,
                     "candidate_budget": strategy.candidate_budget,
                     "parameters": dict(strategy.parameters),
+                    "transfer_score": (transfer_scores or {}).get(
+                        strategy.strategy_id.value
+                    ),
                 }
                 for strategy in plan.strategies
             ],
@@ -1034,6 +1097,7 @@ def _state_from_snapshot(
                 time_cost=float(item_progress.get("time_cost", 0.0)),
                 consumed_batches=consumed,
                 scheduled_batches=consumed,
+                transfer_score=entry.get("transfer_score"),
             )
         )
     return states
@@ -1056,6 +1120,7 @@ def _scheduler_from_snapshot(
                     timeout if timeout is not None else item.time_budget,
                 )
             ),
+            transfer_score=item.transfer_score,
         )
         for item in strategies
     ]

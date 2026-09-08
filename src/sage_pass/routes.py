@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import inspect
+import logging
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile, status
@@ -13,6 +16,7 @@ from .executor import MockExecutor
 from .repository import (
     FileRepository,
     PRIRRepository,
+    PatternKnowledgeRepository,
     StrategyRunRepository,
     TaskRepository,
 )
@@ -23,6 +27,7 @@ from .schemas import (
     ExecutionStarted,
     FileCreated,
     PRIR,
+    PatternKnowledgeResponse,
     RunResult,
     RunStatus,
     StrategyPlan,
@@ -32,6 +37,8 @@ from .schemas import (
     TaskList,
     TaskStatusUpdate,
 )
+from .feedback import FeedbackConfig
+from .transfer import KnowledgeSummary, load_transfer_knowledge
 from .service import (
     create_task,
     file_to_schema,
@@ -43,7 +50,37 @@ from .service import (
 
 
 router = APIRouter(prefix="/api")
+LOGGER = logging.getLogger(__name__)
 SessionDependency = Annotated[Session, Depends(get_session)]
+
+
+def _feedback_config(request: Request) -> FeedbackConfig:
+    settings = request.app.state.settings
+    return FeedbackConfig(
+        minimum_observations=settings.feedback_minimum_observations,
+        minimum_tasks=settings.feedback_minimum_tasks,
+        maximum_patterns_per_scope=settings.feedback_maximum_patterns_per_scope,
+        recency_half_life_days=settings.feedback_recency_half_life_days,
+    )
+
+
+def _knowledge_for_prir(
+    request: Request, session: Session, prir: PRIR
+) -> tuple[list, KnowledgeSummary]:
+    return load_transfer_knowledge(
+        PatternKnowledgeRepository(session),
+        target_type=prir.target_type.value,
+        algorithm=prir.algorithm,
+        candidate_budget=prir.candidate_budget,
+        config=_feedback_config(request),
+    )
+
+
+def _plan_with_knowledge(planner, prir: PRIR, summary: KnowledgeSummary):
+    parameters = inspect.signature(planner.plan).parameters
+    if "knowledge_summary" in parameters:
+        return planner.plan(prir, knowledge_summary=summary)
+    return planner.plan(prir)
 
 
 @router.post(
@@ -211,7 +248,9 @@ def plan_task(
             status_code=409,
             details={"task_id": task_id},
         )
-    plan = request.app.state.planner.plan(prir_to_schema(prir_model))
+    prir = prir_to_schema(prir_model)
+    _, knowledge_summary = _knowledge_for_prir(request, session, prir)
+    plan = _plan_with_knowledge(request.app.state.planner, prir, knowledge_summary)
     if current == TaskStatus.ANALYZED:
         update_task_status(session, task, TaskStatus.PLANNED)
     return plan
@@ -246,7 +285,9 @@ def execute_task(
             status_code=409,
             details={"task_id": task_id},
         )
-    plan = request.app.state.planner.plan(prir_to_schema(prir_model))
+    prir = prir_to_schema(prir_model)
+    _, knowledge_summary = _knowledge_for_prir(request, session, prir)
+    plan = _plan_with_knowledge(request.app.state.planner, prir, knowledge_summary)
     task_detail = task_to_schema(task)
     if payload.mode == ExecutionMode.REAL:
         started = request.app.state.real_executor.start(
@@ -306,7 +347,56 @@ def get_run_result(
         return result
     result = MockExecutor(session).result(run_id)
     _sync_task_status_after_run(session, result.task_id, TaskStatus.COMPLETED)
+    if request.app.state.settings.feedback_enable_mock:
+        try:
+            request.app.state.real_executor.feedback_service.process_completed_run(
+                run_id=result.run_id,
+                task_id=result.task_id,
+                recovered_items=result.recovered_items,
+            )
+        except Exception as exc:  # test-only opt-in must not change run outcome
+            LOGGER.error(
+                "mock feedback processing failed for run_id=%s type=%s",
+                result.run_id,
+                type(exc).__name__,
+            )
     return result
+
+
+@router.get(
+    "/feedback/patterns",
+    response_model=list[PatternKnowledgeResponse],
+    tags=["feedback"],
+)
+def list_feedback_patterns(
+    session: SessionDependency,
+    target_type: str | None = None,
+    algorithm: str | None = None,
+    pattern_type: str | None = None,
+    minimum_confidence: Annotated[float, Query(ge=0.0, le=1.0)] = 0.0,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> list[PatternKnowledgeResponse]:
+    rows = PatternKnowledgeRepository(session).list(
+        target_type=target_type,
+        algorithm=algorithm.strip().casefold() if algorithm else None,
+        pattern_type=pattern_type,
+        minimum_confidence=minimum_confidence,
+        limit=limit,
+    )
+    return [
+        PatternKnowledgeResponse(
+            pattern_id=row.id,
+            scope=row.scope,
+            pattern_type=row.pattern_type,
+            pattern_signature=row.pattern_signature,
+            feature_data=row.feature_data,
+            observation_count=row.observation_count,
+            task_count=row.task_count,
+            confidence=row.confidence,
+            last_seen_at=datetime.fromisoformat(row.last_seen_at),
+        )
+        for row in rows
+    ]
 
 
 def _sync_task_status_after_run(

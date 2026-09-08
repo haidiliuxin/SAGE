@@ -22,6 +22,7 @@ from .enums import (
 )
 from .policy import PolicyValidationError, PolicyValidator
 from .schemas import PRIR, StrategyItem, StrategyPlan
+from .transfer import KnowledgeSummary
 
 
 PROMPT_VERSION = "week2-llm-planner-v1"
@@ -30,6 +31,7 @@ STRATEGY_NAMES = {
     StrategyId.S2: "Rule",
     StrategyId.S3: "PCFG-lite",
     StrategyId.S4: "Context",
+    StrategyId.S5: "Transfer",
 }
 
 
@@ -43,7 +45,7 @@ class _LLMStrategy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     strategy_id: StrategyId
-    priority: int = Field(ge=1, le=4)
+    priority: int = Field(ge=1, le=5)
     time_budget: int = Field(ge=0)
     candidate_budget: int = Field(ge=0)
     reason: str = Field(min_length=1, max_length=200)
@@ -60,7 +62,7 @@ class _LLMStrategy(BaseModel):
 class _LLMPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    strategies: list[_LLMStrategy] = Field(min_length=1, max_length=4)
+    strategies: list[_LLMStrategy] = Field(min_length=1, max_length=5)
     warnings: list[str] = Field(default_factory=list, max_length=8)
 
 
@@ -71,16 +73,16 @@ LLM_PLAN_JSON_SCHEMA: dict[str, Any] = {
         "strategies": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 4,
+            "maxItems": 5,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
                     "strategy_id": {
                         "type": "string",
-                        "enum": ["S1", "S2", "S3", "S4"],
+                        "enum": ["S1", "S2", "S3", "S4", "S5"],
                     },
-                    "priority": {"type": "integer", "minimum": 1, "maximum": 4},
+                    "priority": {"type": "integer", "minimum": 1, "maximum": 5},
                     "time_budget": {"type": "integer", "minimum": 0},
                     "candidate_budget": {"type": "integer", "minimum": 0},
                     "reason": {"type": "string", "minLength": 1, "maxLength": 200},
@@ -112,8 +114,10 @@ LLM_PLAN_JSON_SCHEMA: dict[str, Any] = {
 
 PLANNER_INSTRUCTIONS = """You are the strategy selector for an authorized offline
 password security assessment. You receive only a structured Task Profile (PRIR).
-Choose and budget strategies from S1 Baseline, S2 Rule, S3 PCFG-lite, and S4
-Context. Use S4 only when context_available is true. Low verification cost permits
+Choose and budget strategies from S1 Baseline, S2 Rule, S3 PCFG-lite, S4
+Context, and S5 Transfer. Use S4 only when context_available is true and use S5
+only when feedback_summary.available is true. The feedback summary contains only
+aggregate abstractions; never request or generate recovered plaintext. Low verification cost permits
 broader candidate sets; high verification cost should favor smaller, higher
 probability sets. Each strategy may appear at most once. Priorities must be unique
 and contiguous starting at 1. The sum of time_budget and candidate_budget must not
@@ -273,8 +277,12 @@ class LLMPlanner:
         self._cache: OrderedDict[str, _CacheEntry] = OrderedDict()
         self._lock = threading.RLock()
 
-    def plan(self, prir: PRIR) -> StrategyPlan:
-        profile = _task_profile(prir)
+    def plan(
+        self,
+        prir: PRIR,
+        knowledge_summary: KnowledgeSummary | None = None,
+    ) -> StrategyPlan:
+        profile = _task_profile(prir, knowledge_summary)
         key = _cache_key(profile, self.model)
         try:
             cached = self._cache_get(key)
@@ -282,13 +290,13 @@ class LLMPlanner:
                 cached_plan = _build_strategy_plan(
                     prir, _LLMPlan.model_validate(cached)
                 )
-                return self.validator.validate(prir, cached_plan)
+                return self.validator.validate(prir, cached_plan, knowledge_summary)
             raw = self.gateway.create_plan(profile)
             proposal = _LLMPlan.model_validate_json(raw)
             plan = _build_strategy_plan(prir, proposal)
-            plan = self.validator.validate(prir, plan)
+            plan = self.validator.validate(prir, plan, knowledge_summary)
         except Exception as exc:
-            fallback = self.fallback.plan(prir)
+            fallback = self.fallback.plan(prir, knowledge_summary)
             fallback_name = {
                 PlannerType.MOCK: "Mock",
                 PlannerType.RULE: "Rule",
@@ -328,7 +336,12 @@ class LLMPlanner:
 
 
 class MockPlanner:
-    def plan(self, prir: PRIR) -> StrategyPlan:
+    def plan(
+        self,
+        prir: PRIR,
+        knowledge_summary: KnowledgeSummary | None = None,
+    ) -> StrategyPlan:
+        del knowledge_summary
         baseline = _baseline_strategy(prir)
         strategies = [baseline]
         warnings: list[str] = []
@@ -368,24 +381,28 @@ RULE_WEIGHTS: dict[VerificationCost, dict[StrategyId, float]] = {
         StrategyId.S2: 0.30,
         StrategyId.S3: 0.30,
         StrategyId.S4: 0.20,
+        StrategyId.S5: 0.20,
     },
     VerificationCost.MEDIUM: {
         StrategyId.S1: 0.30,
         StrategyId.S2: 0.30,
         StrategyId.S3: 0.20,
         StrategyId.S4: 0.20,
+        StrategyId.S5: 0.20,
     },
     VerificationCost.HIGH: {
         StrategyId.S1: 0.45,
         StrategyId.S2: 0.17,
         StrategyId.S3: 0.08,
         StrategyId.S4: 0.30,
+        StrategyId.S5: 0.30,
     },
     VerificationCost.UNKNOWN: {
         StrategyId.S1: 0.35,
         StrategyId.S2: 0.25,
         StrategyId.S3: 0.20,
         StrategyId.S4: 0.20,
+        StrategyId.S5: 0.20,
     },
 }
 
@@ -401,6 +418,7 @@ STRATEGY_REASONS = {
     StrategyId.S2: "对基线词进行常见大小写、数字、年份、替换和符号变换",
     StrategyId.S3: "按有限 PCFG 结构概率扩展候选覆盖",
     StrategyId.S4: "利用已提供的关键词、拼音、缩写、年份、地区和组织信息",
+    StrategyId.S5: "将跨任务抽象结构模式应用于当前任务授权种子",
 }
 
 
@@ -416,7 +434,11 @@ class RulePlanner:
         self.validator = validator or PolicyValidator()
         self.fallback = fallback or MockPlanner()
 
-    def plan(self, prir: PRIR) -> StrategyPlan:
+    def plan(
+        self,
+        prir: PRIR,
+        knowledge_summary: KnowledgeSummary | None = None,
+    ) -> StrategyPlan:
         if prir.target_type == TargetType.UNKNOWN:
             return self._fallback(prir, "规则规划器不支持 unknown 目标")
 
@@ -426,6 +448,8 @@ class RulePlanner:
                 order.insert(1, StrategyId.S4)
             else:
                 order.append(StrategyId.S4)
+        if knowledge_summary and knowledge_summary.available:
+            order.insert(1, StrategyId.S5)
 
         candidate_limit = max(
             1,
@@ -441,6 +465,11 @@ class RulePlanner:
         candidate_allocations = _allocate_budget(
             candidate_limit, selected, weights
         )
+        if StrategyId.S5 in candidate_allocations and knowledge_summary is not None:
+            candidate_allocations[StrategyId.S5] = min(
+                candidate_allocations[StrategyId.S5],
+                max(1, knowledge_summary.suggested_s5_max_budget),
+            )
         strategies = [
             StrategyItem(
                 strategy_id=strategy_id,
@@ -475,7 +504,7 @@ class RulePlanner:
             warnings=warnings,
         )
         try:
-            return self.validator.validate(prir, plan)
+            return self.validator.validate(prir, plan, knowledge_summary)
         except PolicyValidationError as exc:
             return self._fallback(
                 prir, f"规则计划未通过策略校验（{type(exc).__name__}）"
@@ -580,20 +609,24 @@ def _rule_parameters(
             "min_probability": 0.001 if cost == VerificationCost.MEDIUM else 0.0001,
             "max_structure_length": 32,
         }
-    return {
-        "use_keywords": True,
-        "use_pinyin": True,
-        "use_abbreviations": True,
-        "use_years": True,
-        "use_region": True,
-        "use_organization": True,
-        "max_combinations": min(candidate_budget, 1_000_000),
-    }
+    if strategy_id == StrategyId.S4:
+        return {
+            "use_keywords": True,
+            "use_pinyin": True,
+            "use_abbreviations": True,
+            "use_years": True,
+            "use_region": True,
+            "use_organization": True,
+            "max_combinations": min(candidate_budget, 1_000_000),
+        }
+    return {}
 
 
-def _task_profile(prir: PRIR) -> dict[str, Any]:
+def _task_profile(
+    prir: PRIR, knowledge_summary: KnowledgeSummary | None = None
+) -> dict[str, Any]:
     """The only data sent to the LLM. Deliberately excludes target/hash content."""
-    return {
+    profile = {
         "target_type": prir.target_type.value,
         "algorithm": prir.algorithm,
         "salt": prir.salt,
@@ -605,6 +638,9 @@ def _task_profile(prir: PRIR) -> dict[str, Any]:
         "confidence": prir.confidence,
         "warnings": list(prir.warnings),
     }
+    if knowledge_summary is not None:
+        profile["feedback_summary"] = knowledge_summary.public_dict()
+    return profile
 
 
 def _cache_key(profile: dict[str, Any], model: str) -> str:

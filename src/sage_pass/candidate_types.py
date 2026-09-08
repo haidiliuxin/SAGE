@@ -18,6 +18,7 @@ CandidateSourceKind: TypeAlias = Literal[
     "region",
     "organization",
     "combination",
+    "transfer_pattern",
 ]
 
 
@@ -29,6 +30,9 @@ class CandidateSource:
     template: str | None = None
     probability: float | None = None
     components: tuple[str, ...] = ()
+    pattern_id: int | None = None
+    pattern_signature: str | None = None
+    pattern_confidence: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

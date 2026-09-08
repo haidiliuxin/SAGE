@@ -13,6 +13,11 @@ from .pcfg_lite import (
     iter_pcfg_candidates,
 )
 from .schemas import StrategyPlan, TaskContext
+from .transfer import (
+    PatternLike,
+    TransferCandidateGenerator,
+    current_task_transfer_seeds,
+)
 
 
 MAX_CANDIDATE_LENGTH = 1024
@@ -56,7 +61,7 @@ class CandidateBatch:
 
 
 class CandidateGenerator:
-    """Generate ordered S1-S4 candidates under shared deduplication limits."""
+    """Generate ordered S1-S5 candidates under shared deduplication limits."""
 
     def __init__(
         self,
@@ -65,11 +70,13 @@ class CandidateGenerator:
         number_suffixes: Sequence[str] = DEFAULT_NUMBER_SUFFIXES,
         year_suffixes: Sequence[str] = DEFAULT_YEAR_SUFFIXES,
         symbol_suffixes: Sequence[str] = DEFAULT_SYMBOL_SUFFIXES,
+        transfer_generator: TransferCandidateGenerator | None = None,
     ) -> None:
         self.baseline_candidates = tuple(baseline_candidates)
         self.number_suffixes = tuple(number_suffixes)
         self.year_suffixes = tuple(year_suffixes)
         self.symbol_suffixes = tuple(symbol_suffixes)
+        self.transfer_generator = transfer_generator or TransferCandidateGenerator()
         _validate_source(self.baseline_candidates, "baseline_candidates")
         _validate_suffixes(self.number_suffixes, "number_suffixes")
         _validate_suffixes(self.year_suffixes, "year_suffixes")
@@ -83,6 +90,7 @@ class CandidateGenerator:
         rule_seeds: Iterable[str] | None = None,
         pcfg_seeds: Iterable[str] | None = None,
         task_context: TaskContext | dict[str, object] | None = None,
+        transfer_patterns: Sequence[PatternLike] = (),
         batch_size: int = DEFAULT_BATCH_SIZE,
         max_candidates: int = MAX_EXECUTION_CANDIDATES,
     ) -> Iterator[CandidateBatch]:
@@ -106,6 +114,9 @@ class CandidateGenerator:
         )
         prepared_rule_seeds = baseline_values if rule_seeds is None else tuple(rule_seeds)
         prepared_pcfg_seeds = baseline_values if pcfg_seeds is None else tuple(pcfg_seeds)
+        prepared_transfer_seeds = current_task_transfer_seeds(
+            baseline_values, task_context
+        )
         _validate_source(prepared_rule_seeds, "rule_seeds")
         _validate_source(prepared_pcfg_seeds, "pcfg_seeds")
 
@@ -121,6 +132,8 @@ class CandidateGenerator:
                 rule_seeds=prepared_rule_seeds,
                 pcfg_seeds=prepared_pcfg_seeds,
                 task_context=task_context,
+                transfer_patterns=transfer_patterns,
+                transfer_seeds=prepared_transfer_seeds,
             )
             accepted = 0
             batch: list[CandidateRecord] = []
@@ -166,6 +179,8 @@ class CandidateGenerator:
         rule_seeds: tuple[str, ...],
         pcfg_seeds: tuple[str, ...],
         task_context: TaskContext | dict[str, object] | None,
+        transfer_patterns: Sequence[PatternLike],
+        transfer_seeds: tuple[str, ...],
     ) -> Iterator[CandidateRecord]:
         if strategy_id == StrategyId.S1:
             yield from baseline_records
@@ -186,6 +201,15 @@ class CandidateGenerator:
             )
         elif strategy_id == StrategyId.S4 and task_context is not None:
             yield from iter_context_candidates(task_context, parameters=parameters)
+        elif strategy_id == StrategyId.S5 and transfer_patterns:
+            years = _context_years(task_context) or self.year_suffixes
+            yield from self.transfer_generator.iter_records(
+                transfer_patterns,
+                seeds=transfer_seeds,
+                years=years,
+                numbers=self.number_suffixes,
+                symbols=self.symbol_suffixes,
+            )
 
     def _iter_rule_records(
         self,
