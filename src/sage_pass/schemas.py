@@ -186,6 +186,18 @@ class FileCreated(BaseModel):
     created_at: datetime
 
 
+class PatternKnowledgeResponse(BaseModel):
+    pattern_id: int
+    scope: str
+    pattern_type: str
+    pattern_signature: str
+    feature_data: dict[str, Any]
+    observation_count: int = Field(ge=0)
+    task_count: int = Field(ge=0)
+    confidence: float = Field(ge=0.0, le=1.0)
+    last_seen_at: datetime
+
+
 class ErrorDetail(BaseModel):
     code: str
     message: str

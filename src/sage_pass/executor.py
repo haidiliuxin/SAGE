@@ -153,8 +153,13 @@ def _effective_elapsed(
     if first.started_at is None:
         return 0.0
     started_epoch = datetime.fromisoformat(first.started_at).timestamp()
-    offset = control.offset_seconds(run_id) if control is not None else 0.0
-    return max(0.0, time.time() - started_epoch - offset)
+    current = time.time()
+    offset = (
+        control.offset_seconds(run_id, now=current)
+        if control is not None
+        else 0.0
+    )
+    return max(0.0, current - started_epoch - offset)
 
 
 def _refresh_run_progress(

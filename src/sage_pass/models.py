@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -120,3 +120,61 @@ class RunRecordModel(Base):
     progress: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[str] = mapped_column(String(40))
     updated_at: Mapped[str] = mapped_column(String(40))
+
+
+class PatternKnowledgeModel(Base):
+    """Cross-run knowledge containing abstractions only, never recovered text."""
+
+    __tablename__ = "pattern_knowledge"
+    __table_args__ = (
+        UniqueConstraint(
+            "scope", "pattern_type", "pattern_signature",
+            name="uq_pattern_knowledge_identity",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    scope: Mapped[str] = mapped_column(String(160), index=True)
+    target_type: Mapped[str] = mapped_column(String(20), index=True)
+    algorithm: Mapped[str] = mapped_column(String(100), index=True)
+    pattern_type: Mapped[str] = mapped_column(String(40), index=True)
+    pattern_signature: Mapped[str] = mapped_column(String(255))
+    feature_data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    observation_count: Mapped[int] = mapped_column(Integer, default=0)
+    task_count: Mapped[int] = mapped_column(Integer, default=0)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    first_seen_at: Mapped[str] = mapped_column(String(40))
+    last_seen_at: Mapped[str] = mapped_column(String(40), index=True)
+    created_at: Mapped[str] = mapped_column(String(40))
+    updated_at: Mapped[str] = mapped_column(String(40))
+
+
+class PatternTaskObservationModel(Base):
+    """Makes task_count idempotent across multiple completed runs of one task."""
+
+    __tablename__ = "pattern_task_observations"
+    __table_args__ = (
+        UniqueConstraint(
+            "pattern_id", "task_id", name="uq_pattern_task_observation"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    pattern_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("pattern_knowledge.id"), index=True
+    )
+    task_id: Mapped[str] = mapped_column(String(32), index=True)
+    first_seen_at: Mapped[str] = mapped_column(String(40))
+
+
+class FeedbackRunModel(Base):
+    """Transaction marker for exactly-once feedback finalization per run."""
+
+    __tablename__ = "feedback_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    task_id: Mapped[str] = mapped_column(String(32), index=True)
+    processed_at: Mapped[str] = mapped_column(String(40))
+    pattern_count: Mapped[int] = mapped_column(Integer, default=0)
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)

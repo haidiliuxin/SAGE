@@ -4,7 +4,10 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .models import (
+    FeedbackRunModel,
     FileModel,
+    PatternKnowledgeModel,
+    PatternTaskObservationModel,
     PRIRModel,
     RunRecordModel,
     StrategyRunModel,
@@ -147,3 +150,82 @@ class RunRecordRepository:
         self.session.commit()
         self.session.refresh(item)
         return item
+
+
+class PatternKnowledgeRepository:
+    """Read and aggregate abstract pattern knowledge in the caller's transaction."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def get_identity(
+        self, scope: str, pattern_type: str, pattern_signature: str
+    ) -> PatternKnowledgeModel | None:
+        return self.session.scalar(
+            select(PatternKnowledgeModel).where(
+                PatternKnowledgeModel.scope == scope,
+                PatternKnowledgeModel.pattern_type == pattern_type,
+                PatternKnowledgeModel.pattern_signature == pattern_signature,
+            )
+        )
+
+    def count_scope(self, scope: str) -> int:
+        return int(self.session.scalar(
+            select(func.count()).select_from(PatternKnowledgeModel).where(
+                PatternKnowledgeModel.scope == scope
+            )
+        ) or 0)
+
+    def task_observed(self, pattern_id: int, task_id: str) -> bool:
+        return self.session.scalar(
+            select(PatternTaskObservationModel.id).where(
+                PatternTaskObservationModel.pattern_id == pattern_id,
+                PatternTaskObservationModel.task_id == task_id,
+            )
+        ) is not None
+
+    def list(
+        self,
+        *,
+        target_type: str | None = None,
+        algorithm: str | None = None,
+        pattern_type: str | None = None,
+        minimum_confidence: float = 0.0,
+        limit: int = 100,
+        minimum_observations: int = 0,
+        minimum_tasks: int = 0,
+    ) -> list[PatternKnowledgeModel]:
+        statement = select(PatternKnowledgeModel).where(
+            PatternKnowledgeModel.confidence >= minimum_confidence,
+            PatternKnowledgeModel.observation_count >= minimum_observations,
+            PatternKnowledgeModel.task_count >= minimum_tasks,
+        )
+        if target_type is not None:
+            statement = statement.where(
+                PatternKnowledgeModel.target_type == target_type
+            )
+        if algorithm is not None:
+            statement = statement.where(PatternKnowledgeModel.algorithm == algorithm)
+        if pattern_type is not None:
+            statement = statement.where(
+                PatternKnowledgeModel.pattern_type == pattern_type
+            )
+        statement = statement.order_by(
+            PatternKnowledgeModel.confidence.desc(),
+            PatternKnowledgeModel.task_count.desc(),
+            PatternKnowledgeModel.observation_count.desc(),
+            PatternKnowledgeModel.pattern_type.asc(),
+            PatternKnowledgeModel.pattern_signature.asc(),
+            PatternKnowledgeModel.id.asc(),
+        ).limit(limit)
+        return list(self.session.scalars(statement))
+
+
+class FeedbackRunRepository:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def get(self, run_id: str) -> FeedbackRunModel | None:
+        return self.session.scalar(
+            select(FeedbackRunModel).where(FeedbackRunModel.run_id == run_id)
+        )

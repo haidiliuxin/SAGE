@@ -29,6 +29,11 @@ class Settings:
     llm_max_output_tokens: int = 700
     llm_cache_ttl_seconds: int = 900
     llm_cache_max_entries: int = 256
+    feedback_minimum_observations: int = 2
+    feedback_minimum_tasks: int = 2
+    feedback_maximum_patterns_per_scope: int = 500
+    feedback_recency_half_life_days: float = 90.0
+    feedback_enable_mock: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -60,4 +65,19 @@ class Settings:
             llm_max_output_tokens=int(os.getenv("SAGE_LLM_MAX_OUTPUT_TOKENS", "700")),
             llm_cache_ttl_seconds=int(os.getenv("SAGE_LLM_CACHE_TTL_SECONDS", "900")),
             llm_cache_max_entries=int(os.getenv("SAGE_LLM_CACHE_MAX_ENTRIES", "256")),
+            feedback_minimum_observations=int(
+                os.getenv("SAGE_FEEDBACK_MINIMUM_OBSERVATIONS", "2")
+            ),
+            feedback_minimum_tasks=int(
+                os.getenv("SAGE_FEEDBACK_MINIMUM_TASKS", "2")
+            ),
+            feedback_maximum_patterns_per_scope=int(
+                os.getenv("SAGE_FEEDBACK_MAXIMUM_PATTERNS_PER_SCOPE", "500")
+            ),
+            feedback_recency_half_life_days=float(
+                os.getenv("SAGE_FEEDBACK_RECENCY_HALF_LIFE_DAYS", "90")
+            ),
+            feedback_enable_mock=os.getenv(
+                "SAGE_FEEDBACK_ENABLE_MOCK", "false"
+            ).strip().lower() in {"1", "true", "yes", "on"},
         )

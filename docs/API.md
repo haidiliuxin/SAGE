@@ -1,6 +1,6 @@
-# SAGE-Pass 统一接口（第 3 周）
+# SAGE-Pass 统一接口（Feedback Engine v2）
 
-版本：`0.2.0`
+版本：`0.3.0`
 基础地址：`http://127.0.0.1:8000`
 
 本文把团队提供的《统一接口.docx》落实为当前后端契约，并记录真实执行、执行控制和 Bandit 自适应调度能力。字段定义的机器可读版本见同目录 `openapi.json`；运行服务后也可在 `/docs` 联调。
@@ -201,11 +201,11 @@ Hash 任务返回示例：
 
 当前 Mock Planner 固定生成 `S1`；如果 PRIR 表明有上下文且预算足够，则追加 `S4`。策略时间预算之和由 `StrategyPlan` 校验，不允许超过任务总时间预算。
 
-设置 `SAGE_PLANNER_TYPE=llm` 并提供 `OPENAI_API_KEY` 后，接口改用 LLM Planner，返回的 `planner_type` 为 `llm`。模型只接收上述结构化 PRIR（不含目标 Hash、文件内容或上下文原文），并通过严格 JSON Schema 在 `S1`～`S4` 中选择策略和分配预算。`SAGE_LLM_API_STYLE=responses` 使用 OpenAI Responses API；`chat_completions` 使用 OpenAI 兼容的 Chat Completions API。硅基流动需同时设置 `OPENAI_BASE_URL=https://api.siliconflow.cn/v1` 和 `SAGE_LLM_API_STYLE=chat_completions`。服务端会再次检查策略唯一性、S4 上下文条件、优先级及时间/候选总预算；API、网络或输出异常时自动返回 Rule 计划，并把降级原因写入 `warnings`。生成限制与 TTL/LRU 缓存参数见 `.env.example`。
+设置 `SAGE_PLANNER_TYPE=llm` 并提供 `OPENAI_API_KEY` 后，接口改用 LLM Planner，返回的 `planner_type` 为 `llm`。模型只接收上述结构化 PRIR 和脱敏反馈摘要（不含目标 Hash、文件内容、上下文原文或恢复明文），并通过严格 JSON Schema 在 `S1`～`S5` 中选择策略和分配预算。反馈摘要只含 `available`、模式数量、主要模式类型、最高置信度和建议 S5 最大预算。`SAGE_LLM_API_STYLE=responses` 使用 OpenAI Responses API；`chat_completions` 使用 OpenAI 兼容的 Chat Completions API。服务端会再次检查策略唯一性、S4 上下文条件、S5 知识可用性、优先级及时间/候选总预算；API、网络或输出异常时自动返回 Rule 计划，并把降级原因写入 `warnings`。
 
-设置 `SAGE_PLANNER_TYPE=rule` 可完全跳过 LLM。Rule Planner 在无上下文时按 S1→S2→S3 规划，有上下文时增加 S4（慢 Hash 时 S4 插入到 S1 之后，即 S1→S4→S2→S3），并把慢 Hash 的候选池限制为任务上限的 25%。中等、未知和低验证成本默认分别使用候选上限的 60%、50% 和 100%。极小预算无法为所有策略各分配至少一个时间单位和候选时，按优先级保留前几个策略并返回 warning。
+设置 `SAGE_PLANNER_TYPE=rule` 可完全跳过 LLM。Rule Planner 在无上下文时按 S1→S2→S3 规划，有上下文时增加 S4；有可用迁移知识时在 S1 后加入 S5。慢 Hash 的候选池限制为任务上限的 25%，S5 候选预算还受知识摘要建议上限约束。极小预算按优先级保留前几个策略并返回 warning。
 
-Policy Validator 当前规则：白名单为 `S1`～`S4`（`S5` 尚未开放）；目标必须是 `hash`、`zip`、`pdf` 或 `office`，且 `S4` 要求 `context_available=true`；每个已选策略的时间和候选预算必须大于零，两类预算总和均不得超过 PRIR；未知参数、错误参数类型或越界值均拒绝。S1 不接收参数，S2 接收七类规则布尔开关，S3 接收 PCFG 模板数/概率/结构长度，S4 接收上下文来源开关和受候选预算限制的组合数。
+Policy Validator 当前规则：白名单为 `S1`～`S5`；目标必须是 `hash`、`zip`、`pdf` 或 `office`，S4 要求 `context_available=true`，S5 要求当前 `target_type + algorithm` 作用域存在满足支持度的 Pattern Knowledge。每个策略的时间和候选预算必须大于零，两类预算总和均不得超过 PRIR；未知参数、错误参数类型或越界值均拒绝。
 
 ## 执行
 
@@ -233,7 +233,7 @@ Mock（第一周链路，无需候选）：
 
 字段说明：
 
-- `candidates`：可选的优先补充候选，最多 100000 条，每条为 1～1024 字符的单行文本；不提供时，后端根据策略计划自动生成 S1～S4 候选；
+- `candidates`：可选的优先补充候选，最多 100000 条，每条为 1～1024 字符的单行文本；不提供时，后端根据策略计划自动生成 S1～S5 候选；
 - `hashcat_mode`：可选。缺省时 Hash 任务由 `known_algorithm` 自动映射（bcrypt=3200、sha256=1400、zip-aes=13600 等），ZIP 任务默认 13600；无法确定时返回 `422`；
 - `timeout`：可选，覆盖策略时间预算的每策略秒数上限。
 
@@ -250,13 +250,15 @@ Mock（第一周链路，无需候选）：
 
 真实执行先按计划生成各策略候选：S1 生成基础候选，S2 执行规则变换，S3 按有限 PCFG 模板概率展开，S4 使用任务上下文生成候选；请求中的补充候选优先参与生成。候选按生成顺序跨策略稳定去重、按策略候选预算截断并形成批次，再由 Bandit Scheduler 动态选择下一批交给 Hashcat。每个策略的多个批次共用该策略的时间预算，统计结果按策略累计；候选写入临时词表，任务结束后清理。
 
-#### S1～S4 候选生成约定
+#### S1～S5 候选生成约定
 
 - S1 使用后端内置的有序 Baseline 候选；请求中可选的 `candidates` 会排在内置候选之前；
 - S2 以补充候选和 S1 基线为种子，只执行当前 `StrategyItem.parameters` 中值为 `true` 的规则；
 - S2 支持 `capitalize_first`、`all_upper`、`all_lower`、`common_number_suffix`、`year_suffix`、`common_substitution` 和 `symbol_suffix`；
 - S3 使用固定有限模板 `W`、`WY`、`WD`、`C`、`CY`、`CD`、`WS`、`CS`、`WYS`、`WDS` 和 `DW`，按模板概率降序生成；`max_templates`、`min_probability` 和 `max_structure_length` 分别控制模板数、概率阈值和最终候选长度；
 - S4 对关键词、地区和组织词执行 Unicode NFKC 与稳定去重，通过 `pypinyin` 派生无声调全拼和首字母缩写，并与任务提供的年份组合；各 `use_*` 参数控制来源，`max_combinations` 控制输出上限；
+- S5 只使用当前任务授权提供的关键词、S1 基线、合法规则种子和历史抽象结构，优先生成 `word + year`、`CapitalizedWord + digits`、`acronym + digits`、`word + digits + symbol` 与受控替换加后缀；
+- S5 的 `CandidateSource` 记录抽象 pattern id/signature、pattern confidence 和当前任务种子，不记录历史恢复明文；
 - 每条内部候选记录保留来源类型、原值、规范化值、模板概率和组合成分。该元数据不改变 HTTP 请求与 Hashcat 的字符串输入契约；
 - 去重保持首次出现顺序，且区分大小写；每条候选必须为 1～1024 字符的非空单行文本；
 - 每个策略最多产生其 `candidate_budget` 指定的数量，全次执行最多生成 100000 条；候选不足时以实际生成数量执行；
@@ -268,7 +270,7 @@ Mock（第一周链路，无需候选）：
 - 探索阶段按 `StrategyItem.priority` 顺序，为每个仍有候选且预算可用的策略执行一个批次；
 - 探索后，每个批次结束都会使用 Hashcat 返回的 `tested`、新增 `recovered` 和实际 `duration` 更新统计，再选择得分最高的策略执行下一批；
 - 评分固定为 `Score = 0.45 * P_success + 0.30 * Gain + 0.15 * Transfer - 0.10 * Cost`；
-- `P_success` 使用 Jeffreys 先验平滑候选成功率，并投影为下一批至少成功一次的概率；`Gain` 为近期每千候选恢复收益的指数移动平均；`Transfer` 使用 Planner 优先级先验 `1 / priority`；`Cost` 为该策略已用执行时间占策略时间预算的比例；
+- `P_success` 使用 Jeffreys 先验平滑候选成功率，并投影为下一批至少成功一次的概率；`Gain` 为近期每千候选恢复收益的指数移动平均；S5 的 `Transfer` 根据同作用域模式的置信度、观察频次、任务覆盖和时效性计算，S1～S4 保持 `1 / priority` 兼容先验；`Cost` 为该策略已用执行时间占策略时间预算的比例；
 - Planner 给出的每策略 `candidate_budget` 和 `time_budget` 仍是硬上限；请求中的 `timeout` 仍覆盖每策略时间上限，但不会放宽任务的 `total_time_budget`；
 - 达到任务候选预算、任务时间预算、任一策略自身预算或候选批次耗尽后，不再为对应范围分配新批次；暂停、继续和取消仍沿用既有批次边界语义；
 - 调度仅改变候选批次的执行顺序和实际预算使用，不改变 `POST /execute`、Run Status 或 Run Result 的请求与响应结构。
@@ -338,12 +340,47 @@ Mock 与真实执行共用该接口。真实执行进行中可轮询进度；时
 
 `recovered_items` 为去重后的真实恢复结果；`target` 是 Hash 文本或 `$zip2$` 密文行，`plaintext` 是恢复的口令。Mock 结果的这两个字段保持兼容（空列表 / `null`）。
 
+## Feedback Engine v2
+
+真实 run 仅在状态为 `completed` 且终态已经持久化后自动进入反馈处理。相同 `run_id` 由 `feedback_runs` 唯一约束和同事务写入保证只处理一次；反馈失败只写入不含明文的错误类型，不会把成功任务改为 failed。cancelled、failed 和默认 Mock run 不进入知识库；测试环境可用 `SAGE_FEEDBACK_ENABLE_MOCK=true` 显式允许 Mock finalize 进入幂等处理（内置 Mock 不产生恢复明文，因此不会形成模式）。
+
+Pattern Knowledge 的作用域为 `target_type + algorithm`，只保存长度、字符类别、压缩结构签名、数字位置、抽象前后缀、大小写模式、合理年份模式和常见替换等结构。最低观察数、最低任务数、单作用域最大模式数和时效半衰期由 `SAGE_FEEDBACK_*` 配置集中控制。
+
+### 查询抽象模式
+
+`GET /api/feedback/patterns`
+
+可选过滤参数：`target_type`、`algorithm`、`pattern_type`、`minimum_confidence`（0～1）和 `limit`（1～500）。排序依次使用置信度、任务数、观察数、模式类型、模式签名和数据库 id，结果稳定可复现。
+
+```json
+[
+  {
+    "pattern_id": 12,
+    "scope": "hash:md5",
+    "pattern_type": "structure_signature",
+    "pattern_signature": "U1L4D4S1",
+    "feature_data": {"signature": "U1L4D4S1", "length": 10},
+    "observation_count": 5,
+    "task_count": 3,
+    "confidence": 0.61,
+    "last_seen_at": "2026-09-08T14:00:00+08:00"
+  }
+]
+```
+
+该接口不会返回恢复明文、目标 Hash、文件内容或历史任务上下文。最终运行结果接口仍按既有契约向当前授权客户端返回该 run 的 `recovered_items`；这与跨任务 Pattern Knowledge 的脱敏存储是两个独立边界。
+
 ## 环境变量（真实执行）
 
 | 变量 | 说明 | 默认 |
 | --- | --- | --- |
 | `SAGE_HASHCAT_PATH` | hashcat 可执行文件路径或命令名 | `hashcat` |
 | `SAGE_ZIP2JOHN_PATH` | zip2john 可执行文件路径或命令名 | `zip2john` |
+| `SAGE_FEEDBACK_MINIMUM_OBSERVATIONS` | S5 可用模式的最低观察数 | `2` |
+| `SAGE_FEEDBACK_MINIMUM_TASKS` | S5 可用模式的最低独立任务数 | `2` |
+| `SAGE_FEEDBACK_MAXIMUM_PATTERNS_PER_SCOPE` | 每个作用域最多保存的模式数 | `500` |
+| `SAGE_FEEDBACK_RECENCY_HALF_LIFE_DAYS` | transfer score 时效半衰期（天） | `90` |
+| `SAGE_FEEDBACK_ENABLE_MOCK` | 仅供测试显式允许 Mock finalize 进入反馈处理 | `false` |
 
 未安装 hashcat 时，`mode: "real"` 的 Hash 任务在启动时返回 `503 EXECUTION_FAILED`（错误信息提示检查 `SAGE_HASHCAT_PATH`）；未安装 zip2john 时，ZIP 分析会降级并给出提示，ZIP 真实执行同样返回 `503`。
 

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from numbers import Real
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from .enums import StrategyId, TargetType, TaskStatus
 from .schemas import PRIR, StrategyItem, StrategyPlan
+
+if TYPE_CHECKING:
+    from .transfer import KnowledgeSummary
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +88,7 @@ STRATEGY_PARAMETER_RULES: dict[StrategyId, dict[str, ParameterRule]] = {
             description="整数范围 1～min(策略候选预算, 1000000)",
         ),
     },
+    StrategyId.S5: {},
 }
 
 PASSWORD_TARGETS = frozenset({
@@ -99,6 +103,7 @@ STRATEGY_TARGETS: dict[StrategyId, frozenset[TargetType]] = {
     StrategyId.S2: PASSWORD_TARGETS,
     StrategyId.S3: PASSWORD_TARGETS,
     StrategyId.S4: PASSWORD_TARGETS,
+    StrategyId.S5: PASSWORD_TARGETS,
 }
 
 
@@ -119,10 +124,15 @@ class PolicyValidator:
         )
         self.strategy_whitelist = frozenset(self.strategy_parameter_rules)
 
-    def validate(self, prir: PRIR, plan: StrategyPlan) -> StrategyPlan:
+    def validate(
+        self,
+        prir: PRIR,
+        plan: StrategyPlan,
+        knowledge_summary: KnowledgeSummary | None = None,
+    ) -> StrategyPlan:
         issues: list[PolicyIssue] = []
         self._validate_envelope(prir, plan, issues)
-        self._validate_strategies(prir, plan, issues)
+        self._validate_strategies(prir, plan, issues, knowledge_summary)
         self._validate_budgets(prir, plan, issues)
         if issues:
             raise PolicyValidationError(issues)
@@ -143,7 +153,11 @@ class PolicyValidator:
             issues.append(PolicyIssue("EMPTY_PLAN", "策略计划不能为空"))
 
     def _validate_strategies(
-        self, prir: PRIR, plan: StrategyPlan, issues: list[PolicyIssue]
+        self,
+        prir: PRIR,
+        plan: StrategyPlan,
+        issues: list[PolicyIssue],
+        knowledge_summary: KnowledgeSummary | None,
     ) -> None:
         seen: set[StrategyId] = set()
         priorities: list[int] = []
@@ -182,6 +196,25 @@ class PolicyValidator:
                     PolicyIssue(
                         "CONTEXT_REQUIRED",
                         "S4 仅适用于具有上下文的任务",
+                        strategy_id=strategy_label,
+                    )
+                )
+            if strategy_id == StrategyId.S5 and not (
+                knowledge_summary and knowledge_summary.available
+            ):
+                # Keep the public legacy rejection category while adding the
+                # more precise reason for callers that understand Feedback v2.
+                issues.append(
+                    PolicyIssue(
+                        "STRATEGY_NOT_ALLOWED",
+                        "S5 在当前任务中未启用",
+                        strategy_id=strategy_label,
+                    )
+                )
+                issues.append(
+                    PolicyIssue(
+                        "TRANSFER_KNOWLEDGE_REQUIRED",
+                        "S5 仅在存在满足支持度的迁移知识时可用",
                         strategy_id=strategy_label,
                     )
                 )

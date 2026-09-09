@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "SAGE-Pass API",
-    "description": "面向异构离线口令安全评测任务的编排 API。支持 mock 与基于 Hashcat 的真实执行（第二周），并接入 WinZip AES（$zip2$）加密 ZIP 目标，并支持可配置的 LLM 策略规划。",
-    "version": "0.2.0"
+    "description": "面向异构离线口令安全评测任务的编排 API。支持 mock 与基于 Hashcat 的真实执行（第二周），并接入 WinZip AES（$zip2$）加密 ZIP 目标、可配置的 LLM 策略规划，以及只保存抽象结构的 Feedback Engine v2 与 S5 迁移策略。",
+    "version": "0.3.0"
   },
   "paths": {
     "/api/files": {
@@ -628,6 +628,115 @@
         }
       }
     },
+    "/api/feedback/patterns": {
+      "get": {
+        "tags": [
+          "feedback"
+        ],
+        "summary": "List Feedback Patterns",
+        "operationId": "list_feedback_patterns_api_feedback_patterns_get",
+        "parameters": [
+          {
+            "name": "target_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Target Type"
+            }
+          },
+          {
+            "name": "algorithm",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Algorithm"
+            }
+          },
+          {
+            "name": "pattern_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Pattern Type"
+            }
+          },
+          {
+            "name": "minimum_confidence",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "default": 0.0,
+              "title": "Minimum Confidence"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PatternKnowledgeResponse"
+                  },
+                  "title": "Response List Feedback Patterns Api Feedback Patterns Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/health": {
       "get": {
         "tags": [
@@ -928,6 +1037,65 @@
           "confidence"
         ],
         "title": "PRIR"
+      },
+      "PatternKnowledgeResponse": {
+        "properties": {
+          "pattern_id": {
+            "type": "integer",
+            "title": "Pattern Id"
+          },
+          "scope": {
+            "type": "string",
+            "title": "Scope"
+          },
+          "pattern_type": {
+            "type": "string",
+            "title": "Pattern Type"
+          },
+          "pattern_signature": {
+            "type": "string",
+            "title": "Pattern Signature"
+          },
+          "feature_data": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Feature Data"
+          },
+          "observation_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Observation Count"
+          },
+          "task_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Task Count"
+          },
+          "confidence": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence"
+          },
+          "last_seen_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Last Seen At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "pattern_id",
+          "scope",
+          "pattern_type",
+          "pattern_signature",
+          "feature_data",
+          "observation_count",
+          "task_count",
+          "confidence",
+          "last_seen_at"
+        ],
+        "title": "PatternKnowledgeResponse"
       },
       "PlannerType": {
         "type": "string",
