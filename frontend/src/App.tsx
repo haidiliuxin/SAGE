@@ -8,6 +8,8 @@ import type {
   PlannerType,
   PRIR,
   RunStatus,
+  SchedulerType,
+  SystemConfig,
   TargetType,
   TaskDetail,
   TaskInput,
@@ -84,7 +86,15 @@ const plannerTypeLabels: Record<PlannerType, string> = {
   mock: 'Mock 降级',
   rule: '规则规划',
   llm: 'LLM 规划',
-  adaptive: '自适应规划',
+}
+
+const schedulerTypeLabels: Record<SchedulerType, string> = {
+  fixed: '固定顺序',
+  round_robin: '轮询',
+  heuristic_bandit: '启发式 Bandit',
+  ucb: 'UCB',
+  cost_aware_ucb: '成本感知 UCB',
+  thompson: 'Thompson 采样',
 }
 
 const strategyParameterLabels: Record<string, string> = {
@@ -184,6 +194,7 @@ function App() {
   const [tasksLoading, setTasksLoading] = useState(false)
   const [tasksError, setTasksError] = useState('')
   const [health, setHealth] = useState<'checking' | 'online' | 'offline'>('checking')
+  const [systemConfig, setSystemConfig] = useState<SystemConfig | null>(null)
   const [selectedTask, setSelectedTask] = useState<TaskDetail | null>(null)
   const [selectedFile, setSelectedFile] = useState<FileDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
@@ -211,7 +222,16 @@ function App() {
         if (active) setHealth('offline')
       }
     }
+    const loadConfig = async () => {
+      try {
+        const config = await api.getSystemConfig()
+        if (active) setSystemConfig(config)
+      } catch {
+        // 配置读取失败不影响工作台其余功能。
+      }
+    }
     void check()
+    void loadConfig()
     const timer = window.setInterval(check, 15000)
     return () => {
       active = false
@@ -469,7 +489,11 @@ function App() {
         <div className="sidebar-foot">
           <span className="eyebrow">SYSTEM</span>
           <strong>Policy orchestration</strong>
-          <p>第二周 · 智能策略规划</p>
+          <p>
+            规划 {systemConfig ? plannerTypeLabels[systemConfig.planner_type] : '读取中'}
+            {' · '}
+            调度 {systemConfig ? schedulerTypeLabels[systemConfig.scheduler_type] : '读取中'}
+          </p>
           <div className={`system-status ${health}`}><i /> {health === 'online' ? '后端服务正常' : health === 'offline' ? '后端服务离线' : '正在检查服务'}</div>
         </div>
       </aside>

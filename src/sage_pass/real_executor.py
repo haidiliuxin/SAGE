@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from .candidate_generator import CandidateBatch, CandidateGenerator
 from .candidate_types import CandidateRecord
 from .config import Settings
-from .enums import ExecutionMode, TargetType, TaskStatus
+from .enums import ExecutionMode, SchedulerType, TargetType, TaskStatus
 from .errors import AppError
 from .feedback import FeedbackConfig, FeedbackService
 from .hashcat_adapter import (
@@ -23,6 +23,7 @@ from .hashcat_adapter import (
     RecoveredCredential,
     resolve_hashcat_mode,
 )
+from .interfaces import BatchOutcome, DecisionEvent
 from .models import RunRecordModel
 from .repository import (
     FileRepository,
@@ -37,6 +38,7 @@ from .scheduler import (
     ArmSpec,
     BanditScheduler,
     SchedulerStopReason,
+    build_scheduler,
 )
 from .schemas import (
     ExecutionRequest,
@@ -49,11 +51,16 @@ from .schemas import (
     TaskDetail,
 )
 from .service import now_iso, public_id, update_task_status
+from .targets import build_target_extractors, extract_target
 from .zip_adapter import ZipHashExtractor
 from .transfer import load_transfer_knowledge
 
 ZIP_EXTRACTION_TIMEOUT = 30.0
 LOGGER = logging.getLogger(__name__)
+
+_TERMINAL_STATUSES = frozenset(
+    {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}
+)
 
 
 @dataclass
@@ -101,6 +108,8 @@ class _RunState:
     thread: threading.Thread | None = None
     scheduler: BanditScheduler | None = None
     current_strategy_id: str | None = None
+    decision_events: list[DecisionEvent] = field(default_factory=list)
+    round_index: int = 0
 
 
 class RealExecutor:
@@ -341,6 +350,7 @@ class RealExecutor:
             transfer_scores={
                 item.strategy_id: item.transfer_score for item in strategies
             },
+            scheduler_type=self.settings.scheduler_type.value,
         )
         record = RunRecordModel(
             run_id=run_id,
@@ -355,6 +365,37 @@ class RealExecutor:
         )
         RunRecordRepository(session).add(record)
 
+        arms = [
+            ArmSpec(
+                strategy_id=item.strategy_id,
+                priority=item.priority,
+                candidate_budget=item.candidate_budget,
+                time_budget=float(
+                    max(
+                        1,
+                        payload.timeout
+                        if payload.timeout is not None
+                        else item.time_budget,
+                    )
+                ),
+                transfer_score=item.transfer_score,
+            )
+            for item in strategies
+        ]
+        try:
+            scheduler = build_scheduler(
+                self.settings.scheduler_type,
+                arms,
+                total_candidate_budget=task.candidate_budget,
+                total_time_budget=float(plan.total_time_budget),
+            )
+        except ValueError as exc:
+            raise AppError(
+                "EXECUTION_FAILED",
+                str(exc),
+                status_code=422,
+                details={"scheduler_type": self.settings.scheduler_type.value},
+            ) from exc
         state = _RunState(
             run_id=run_id,
             task_id=task.task_id,
@@ -363,27 +404,7 @@ class RealExecutor:
             strategies=strategies,
             started_at=started_at,
             expected_candidates=expected,
-            scheduler=BanditScheduler(
-                [
-                    ArmSpec(
-                        strategy_id=item.strategy_id,
-                        priority=item.priority,
-                        candidate_budget=item.candidate_budget,
-                        time_budget=float(
-                            max(
-                                1,
-                                payload.timeout
-                                if payload.timeout is not None
-                                else item.time_budget,
-                            )
-                        ),
-                        transfer_score=item.transfer_score,
-                    )
-                    for item in strategies
-                ],
-                total_candidate_budget=task.candidate_budget,
-                total_time_budget=float(plan.total_time_budget),
-            ),
+            scheduler=scheduler,
         )
         with self._lock:
             self._registry[run_id] = state
@@ -402,6 +423,103 @@ class RealExecutor:
             status=TaskStatus.RUNNING,
             started_at=datetime.fromisoformat(started_at),
         )
+
+    # ------------------------------------------------------------------ 持久化读取
+    def has_record(self, run_id: str) -> bool:
+        """是否存在该 run 的持久化记录（用于重启后查询真实结果）。"""
+        with self.session_factory() as session:
+            return RunRecordRepository(session).get(run_id) is not None
+
+    def load_persisted_status(self, run_id: str) -> RunStatus:
+        record = self._require_record(run_id)
+        snapshot, progress = _validate_record_payload(record)
+        del snapshot
+        strategies = progress["strategies"]
+        tested = sum(int(item.get("tested", 0)) for item in strategies.values())
+        recovered = sum(
+            int(item.get("recovered", 0)) for item in strategies.values()
+        )
+        expected = int(progress.get("expected_candidates", 0))
+        status = TaskStatus(record.status)
+        progress_ratio = (
+            min(1.0, tested / expected) if expected > 0 else 1.0
+        )
+        return RunStatus(
+            task_id=record.task_id,
+            run_id=run_id,
+            status=status,
+            progress=1.0 if status in _TERMINAL_STATUSES else progress_ratio,
+            current_strategy=None,
+            elapsed_time=_record_elapsed(record),
+            tested=tested,
+            recovered=recovered,
+            message=record.message or _record_default_message(status),
+        )
+
+    def load_persisted_result(self, run_id: str) -> RunResult:
+        record = self._require_record(run_id)
+        snapshot, progress = _validate_record_payload(record)
+        status = TaskStatus(record.status)
+        if status not in _TERMINAL_STATUSES:
+            raise AppError(
+                "RUN_IN_PROGRESS",
+                "真实执行尚未结束，请稍后获取结果",
+                status_code=409,
+                details={"run_id": run_id},
+            )
+        strategies = progress["strategies"]
+        recovered_seen: set[tuple[str, str]] = set()
+        recovered_items: list[RecoveredItem] = []
+        strategy_results: list[StrategyResult] = []
+        for entry in snapshot["plan"]["strategies"]:
+            strategy_id = entry["strategy_id"]
+            item = strategies.get(strategy_id, {})
+            tested = int(item.get("tested", 0))
+            recovered = int(item.get("recovered", 0))
+            strategy_results.append(
+                StrategyResult(
+                    strategy_id=strategy_id,
+                    time=float(item.get("time_cost", 0.0)),
+                    tested=tested,
+                    recovered=recovered,
+                    success_rate=(
+                        recovered / tested if tested > 0 else 0.0
+                    ),
+                )
+            )
+            for target, plaintext in item.get("recovered_items", []):
+                key = (target, plaintext)
+                if key in recovered_seen:
+                    continue
+                recovered_seen.add(key)
+                recovered_items.append(
+                    RecoveredItem(target=target, plaintext=plaintext)
+                )
+        finished_at = record.finished_at or record.updated_at
+        return RunResult(
+            task_id=record.task_id,
+            run_id=run_id,
+            status=status,
+            total_time=_record_elapsed(record),
+            total_tested=sum(item.tested for item in strategy_results),
+            total_recovered=len(recovered_items),
+            strategy_results=strategy_results,
+            finished_at=datetime.fromisoformat(finished_at),
+            recovered_items=recovered_items,
+            message=record.message or _record_default_message(status),
+        )
+
+    def _require_record(self, run_id: str) -> RunRecordModel:
+        with self.session_factory() as session:
+            record = RunRecordRepository(session).get(run_id)
+        if record is None:
+            raise AppError(
+                "EXECUTION_FAILED",
+                "执行不存在",
+                status_code=404,
+                details={"run_id": run_id},
+            )
+        return record
 
     # ------------------------------------------------------------------ 取消
     def cancel_task_runs(self, task_id: str) -> list[str]:
@@ -429,71 +547,64 @@ class RealExecutor:
             self.control.clear_all()
 
     # ------------------------------------------------------------------ 内部
+    def _target_extractors(self):
+        """按当前实例的 zip 适配器构造提取器链（保持测试可注入 zip_extractor）。"""
+        return build_target_extractors(self.settings, zip_extractor=self.zip_extractor)
+
+    def _target_file_path(self, session: Session, task: TaskDetail):
+        if not task.target.file_id:
+            return None
+        file_item = FileRepository(session).get(task.target.file_id)
+        if file_item is None:
+            raise AppError(
+                "EXECUTION_FAILED",
+                "目标文件不存在",
+                status_code=422,
+                details={"file_id": task.target.file_id},
+            )
+        return self.settings.upload_dir / file_item.stored_name
+
     def _resolve_targets(
         self, session: Session, task: TaskDetail, explicit_mode: int | None
     ) -> tuple[tuple[str, ...], int]:
+        """目标解析与 Hashcat 模式判定。
+
+        模式判定顺序（A 第 2 项验收）：显式 hashcat_mode → known_algorithm →
+        Analyzer 写入的 PRIR.algorithm → 报错；未知算法仍可用显式模式覆盖。
+        """
         target_type = task.target.type
-        if target_type == TargetType.HASH:
-            lines = [
-                line.strip()
-                for line in (task.target.content or "").splitlines()
-                if line.strip()
-            ]
-            if not lines:
-                raise AppError(
-                    "EXECUTION_FAILED",
-                    "Hash 目标缺少内容",
-                    status_code=422,
-                    details={"task_id": task.task_id},
-                )
-            mode = explicit_mode
-            if mode is None and task.known_algorithm:
-                mode = resolve_hashcat_mode(task.known_algorithm)
-            if mode is None:
-                raise AppError(
-                    "EXECUTION_FAILED",
-                    "无法确定 Hashcat 模式，请提供 hashcat_mode 或 known_algorithm",
-                    status_code=422,
-                    details={"task_id": task.task_id},
-                )
-            return tuple(lines), mode
-
-        if target_type == TargetType.ZIP:
-            if not task.target.file_id:
-                raise AppError(
-                    "EXECUTION_FAILED",
-                    "ZIP 目标缺少 file_id",
-                    status_code=422,
-                    details={"task_id": task.task_id},
-                )
-            file_item = FileRepository(session).get(task.target.file_id)
-            if file_item is None:
-                raise AppError(
-                    "EXECUTION_FAILED",
-                    "ZIP 目标文件不存在",
-                    status_code=422,
-                    details={"file_id": task.target.file_id},
-                )
-            archive = self.settings.upload_dir / file_item.stored_name
-            extracted = self.zip_extractor.extract(
-                archive, timeout=ZIP_EXTRACTION_TIMEOUT
-            )
-            if not extracted.hashes:
-                raise AppError(
-                    "EXECUTION_FAILED",
-                    "ZIP 中未提取到受支持的加密目标",
-                    status_code=422,
-                    details={"file_id": task.target.file_id},
-                )
-            mode = explicit_mode or extracted.hashcat_mode
-            return extracted.hashes, mode
-
-        raise AppError(
-            "EXECUTION_FAILED",
-            f"{target_type.value} 目标类型暂未接入真实执行，本周仅支持 hash 与 ZIP",
-            status_code=422,
-            details={"task_id": task.task_id, "target_type": target_type.value},
+        extracted = extract_target(
+            self._target_extractors(),
+            target_type=target_type,
+            content=task.target.content,
+            file_path=self._target_file_path(session, task),
         )
+        mode = explicit_mode
+        if mode is None and target_type == TargetType.HASH:
+            if task.known_algorithm:
+                mode = resolve_hashcat_mode(task.known_algorithm)
+            else:
+                prir_model = PRIRRepository(session).get(task.task_id)
+                prir_algorithm = (
+                    prir_model.algorithm if prir_model is not None else None
+                )
+                if prir_algorithm and prir_algorithm != "unknown":
+                    mode = resolve_hashcat_mode(prir_algorithm)
+        if mode is None and extracted.hashcat_mode is not None:
+            mode = extracted.hashcat_mode
+        if mode is None:
+            raise AppError(
+                "EXECUTION_FAILED",
+                "无法确定 Hashcat 模式：请提供 hashcat_mode、known_algorithm，"
+                "或先完成 Analyzer 识别",
+                status_code=422,
+                details={
+                    "task_id": task.task_id,
+                    "target_type": target_type.value,
+                    "algorithm": extracted.algorithm,
+                },
+            )
+        return extracted.hashes, mode
 
     def _run_worker(self, run_id: str) -> None:
         state = self._registry[run_id]
@@ -562,6 +673,9 @@ class RealExecutor:
             candidates = source_batch[: decision.candidate_limit]
             item.next_batch_index += 1
             item.scheduled_batches += 1
+            state.round_index += 1
+            prior_state = scheduler.snapshot_statistics()
+            prior_scores = _decision_scores(scheduler, next_batch_sizes)
             item.started_at = item.started_at or now_iso()
             with self._lock:
                 state.current_strategy_id = item.strategy_id
@@ -595,8 +709,17 @@ class RealExecutor:
                 item.handle = None
                 with self._lock:
                     state.current_strategy_id = None
-                self._record_batch_result(
-                    scheduler, item, candidates, result
+                outcome = self._record_batch_result(
+                    scheduler, state, item, candidates, result
+                )
+                self._record_decision_event(
+                    state,
+                    decision,
+                    item,
+                    prior_state,
+                    prior_scores,
+                    outcome,
+                    stop_reason="cancelled",
                 )
                 self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
                 return
@@ -612,7 +735,12 @@ class RealExecutor:
                 item.handle = None
                 with self._lock:
                     state.current_strategy_id = None
-            self._record_batch_result(scheduler, item, candidates, result)
+            outcome = self._record_batch_result(
+                scheduler, state, item, candidates, result
+            )
+            self._record_decision_event(
+                state, decision, item, prior_state, prior_scores, outcome
+            )
             if result.status == TaskStatus.FAILED:
                 item.status = TaskStatus.FAILED.value
                 item.finished_at = now_iso()
@@ -627,19 +755,68 @@ class RealExecutor:
     def _record_batch_result(
         self,
         scheduler: BanditScheduler,
+        state: _RunState,
         item: _StrategyState,
         candidates: tuple[str, ...],
         result: HashcatResult,
-    ) -> None:
+    ) -> BatchOutcome:
         recovered = self._accumulate_result(item, result)
         item.time_cost += result.duration
-        scheduler.observe(
-            item.strategy_id,
+        outcome = BatchOutcome(
+            run_id=state.run_id,
+            arm_id=item.strategy_id,
+            strategy_id=item.strategy_id,
+            batch_index=item.scheduled_batches,
             candidate_count=len(candidates),
             tested=result.tested,
             recovered=recovered,
             duration=result.duration,
+            status=result.status,
+            exit_code=result.exit_code,
+            message=result.message,
         )
+        scheduler.observe(
+            item.strategy_id,
+            candidate_count=outcome.candidate_count,
+            tested=outcome.tested,
+            recovered=outcome.recovered,
+            duration=outcome.duration,
+        )
+        return outcome
+
+    def _record_decision_event(
+        self,
+        state: _RunState,
+        decision,
+        item: _StrategyState,
+        prior_state: dict[str, dict[str, object]],
+        prior_scores: dict[str, float],
+        outcome: BatchOutcome,
+        stop_reason: str | None = None,
+    ) -> None:
+        """记录一次调度决策（研究日志；不含恢复明文）。"""
+        reward = (
+            outcome.recovered / outcome.tested if outcome.tested > 0 else 0.0
+        )
+        event = DecisionEvent(
+            run_id=state.run_id,
+            round_index=state.round_index,
+            arm_id=item.strategy_id,
+            strategy_id=item.strategy_id,
+            candidate_limit=decision.candidate_limit,
+            time_limit=decision.time_limit,
+            exploration=decision.exploration,
+            scores=prior_scores,
+            score_breakdown=decision.score,
+            prior_state=prior_state.get(item.strategy_id, {}),
+            feedback=outcome,
+            reward=reward,
+            stop_reason=stop_reason,
+        )
+        with self._lock:
+            state.decision_events.append(event)
+            if len(state.decision_events) > 200:
+                del state.decision_events[:-200]
 
     # ------------------------------------------------------------------ 持久化
     def _checkpoint(self, state: _RunState) -> None:
@@ -982,6 +1159,7 @@ def _serialize_snapshot(
     expected: int,
     total_candidate_budget: int,
     transfer_scores: dict[str, float | None] | None = None,
+    scheduler_type: str = SchedulerType.HEURISTIC_BANDIT.value,
 ) -> dict[str, Any]:
     """启动时写入运行记录的静态快照（目标、计划、候选批次等）。"""
     return {
@@ -989,6 +1167,7 @@ def _serialize_snapshot(
         "hash_mode": hash_mode,
         "expected_candidates": expected,
         "timeout_override": payload.timeout,
+        "scheduler_type": scheduler_type,
         "plan": {
             "total_time_budget": plan.total_time_budget,
             "total_candidate_budget": total_candidate_budget,
@@ -1057,6 +1236,10 @@ def _serialize_progress(state: _RunState) -> dict[str, Any]:
             for item in state.strategies
         },
         "scheduler_stats": scheduler_stats,
+        "round_index": state.round_index,
+        "decision_events": [
+            event.as_dict() for event in state.decision_events[-50:]
+        ],
     }
 
 
@@ -1125,7 +1308,11 @@ def _scheduler_from_snapshot(
         for item in strategies
     ]
     plan_meta = snapshot["plan"]
-    scheduler = BanditScheduler(
+    scheduler_type = SchedulerType(
+        snapshot.get("scheduler_type", SchedulerType.HEURISTIC_BANDIT.value)
+    )
+    scheduler = build_scheduler(
+        scheduler_type,
         arms,
         total_candidate_budget=int(
             plan_meta.get(
@@ -1139,6 +1326,65 @@ def _scheduler_from_snapshot(
     if stats:
         scheduler.restore_statistics(stats)
     return scheduler
+
+
+def _validate_record_payload(
+    record: RunRecordModel,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """校验持久化记录可用；损坏/旧格式给出明确错误而不是静默降级。"""
+    snapshot = record.snapshot if isinstance(record.snapshot, dict) else None
+    progress = record.progress if isinstance(record.progress, dict) else None
+    plan_entries = (
+        snapshot.get("plan", {}).get("strategies")
+        if isinstance(snapshot, dict)
+        else None
+    )
+    if (
+        not snapshot
+        or not progress
+        or not isinstance(plan_entries, list)
+        or not isinstance(progress.get("strategies"), dict)
+    ):
+        raise AppError(
+            "EXECUTION_FAILED",
+            "运行记录损坏或不兼容，无法恢复真实结果",
+            status_code=409,
+            details={"run_id": record.run_id},
+        )
+    return snapshot, progress
+
+
+def _record_elapsed(record: RunRecordModel) -> float:
+    if not record.started_at:
+        return 0.0
+    return _elapsed_seconds(record.started_at, record.finished_at)
+
+
+def _record_default_message(status: TaskStatus) -> str:
+    if status == TaskStatus.COMPLETED:
+        return "真实执行已完成"
+    if status == TaskStatus.CANCELLED:
+        return "真实执行已停止"
+    if status == TaskStatus.FAILED:
+        return "真实执行失败"
+    if status == TaskStatus.PAUSED:
+        return "真实执行已暂停"
+    return "真实执行中"
+
+
+def _decision_scores(
+    scheduler: BanditScheduler, next_batch_sizes: dict[str, int]
+) -> dict[str, float]:
+    """决策前各可用 Arm 的评分快照（写入 DecisionEvent）。"""
+    scores: dict[str, float] = {}
+    for strategy_id, size in next_batch_sizes.items():
+        if size <= 0:
+            continue
+        try:
+            scores[strategy_id] = scheduler.score(strategy_id, size).score
+        except Exception:  # pragma: no cover - 评分失败不影响调度
+            continue
+    return scores
 
 
 def _to_run_row(run_id: str, task_id: str, item: _StrategyState) -> Any:
@@ -1178,8 +1424,7 @@ def _strategy_result_time(item: _StrategyState) -> float:
 
 def _next_batch_sizes(
     strategies: list[_StrategyState],
-) -> dict[str, int]:
-    return {
+) -> dict[str, int]:    return {
         item.strategy_id: (
             len(item.candidate_batches[item.next_batch_index])
             if item.next_batch_index < len(item.candidate_batches)

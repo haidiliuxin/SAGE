@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from .enums import TargetType, TaskStatus, VerificationCost
 from .errors import AppError
+from .hashcat_adapter import normalize_algorithm_name
 from .models import PRIRModel
 from .repository import FileRepository, PRIRRepository
 from .schemas import PRIR, TaskContext, TaskDetail
@@ -117,10 +118,11 @@ def _analyze_target(
 ) -> tuple[str, bool | None, VerificationCost, float, list[str]]:
     warnings: list[str] = []
     if task.known_algorithm:
+        canonical = normalize_algorithm_name(task.known_algorithm)
         return (
-            task.known_algorithm,
-            _salt_for_algorithm(task.known_algorithm),
-            _cost_for_algorithm(task.known_algorithm),
+            canonical,
+            _salt_for_algorithm(canonical),
+            _cost_for_algorithm(canonical),
             0.9,
             warnings,
         )
@@ -210,6 +212,12 @@ def _detect_hash_algorithm(content: str) -> str:
     value = content.strip()
     if value.startswith(("$2a$", "$2b$", "$2y$")):
         return "bcrypt"
+    if value.startswith("$argon2id$"):
+        return "argon2id"
+    if value.startswith("$argon2i$"):
+        return "argon2i"
+    if value.startswith("$argon2d$"):
+        return "argon2d"
     if value.startswith("$argon2"):
         return "argon2"
     if re.fullmatch(r"[a-fA-F0-9]{32}", value):
@@ -223,9 +231,12 @@ def _detect_hash_algorithm(content: str) -> str:
     return "unknown"
 
 
+ARGON2_ALGORITHMS = frozenset({"argon2", "argon2i", "argon2d", "argon2id"})
+
+
 def _salt_for_algorithm(algorithm: str) -> bool | None:
-    normalized = algorithm.lower()
-    if normalized in {"bcrypt", "argon2"}:
+    normalized = normalize_algorithm_name(algorithm)
+    if normalized in {"bcrypt"} | ARGON2_ALGORITHMS:
         return True
     if normalized in {"md5", "sha1", "sha256", "sha512"}:
         return False
@@ -233,8 +244,8 @@ def _salt_for_algorithm(algorithm: str) -> bool | None:
 
 
 def _cost_for_algorithm(algorithm: str) -> VerificationCost:
-    normalized = algorithm.lower()
-    if normalized in {"bcrypt", "argon2"}:
+    normalized = normalize_algorithm_name(algorithm)
+    if normalized in {"bcrypt"} | ARGON2_ALGORITHMS:
         return VerificationCost.HIGH
     if normalized in {"sha256", "sha512"}:
         return VerificationCost.MEDIUM

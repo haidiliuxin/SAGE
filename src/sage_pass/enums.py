@@ -39,7 +39,17 @@ class PlannerType(StrEnum):
     MOCK = "mock"
     RULE = "rule"
     LLM = "llm"
-    ADAPTIVE = "adaptive"
+
+
+class SchedulerType(StrEnum):
+    """调度模式（与 Planner 类型分离，修正 adaptive 语义）。"""
+
+    FIXED = "fixed"
+    ROUND_ROBIN = "round_robin"
+    HEURISTIC_BANDIT = "heuristic_bandit"
+    UCB = "ucb"
+    COST_AWARE_UCB = "cost_aware_ucb"
+    THOMPSON = "thompson"
 
 
 class LLMApiStyle(StrEnum):

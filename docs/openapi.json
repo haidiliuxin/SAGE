@@ -3,7 +3,7 @@
   "info": {
     "title": "SAGE-Pass API",
     "description": "面向异构离线口令安全评测任务的编排 API。支持 mock 与基于 Hashcat 的真实执行（第二周），并接入 WinZip AES（$zip2$）加密 ZIP 目标、可配置的 LLM 策略规划，以及只保存抽象结构的 Feedback Engine v2 与 S5 迁移策略。",
-    "version": "0.3.0"
+    "version": "0.4.0"
   },
   "paths": {
     "/api/files": {
@@ -628,6 +628,27 @@
         }
       }
     },
+    "/api/system/config": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Get System Config",
+        "operationId": "get_system_config_api_system_config_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemConfigResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/feedback/patterns": {
       "get": {
         "tags": [
@@ -1102,8 +1123,7 @@
         "enum": [
           "mock",
           "rule",
-          "llm",
-          "adaptive"
+          "llm"
         ],
         "title": "PlannerType"
       },
@@ -1259,6 +1279,19 @@
         ],
         "title": "RunStatus"
       },
+      "SchedulerType": {
+        "type": "string",
+        "enum": [
+          "fixed",
+          "round_robin",
+          "heuristic_bandit",
+          "ucb",
+          "cost_aware_ucb",
+          "thompson"
+        ],
+        "title": "SchedulerType",
+        "description": "调度模式（与 Planner 类型分离，修正 adaptive 语义）。"
+      },
       "StrategyId": {
         "type": "string",
         "enum": [
@@ -1392,6 +1425,33 @@
           "success_rate"
         ],
         "title": "StrategyResult"
+      },
+      "SystemConfigResponse": {
+        "properties": {
+          "planner_type": {
+            "$ref": "#/components/schemas/PlannerType"
+          },
+          "scheduler_type": {
+            "$ref": "#/components/schemas/SchedulerType"
+          },
+          "real_execution_configured": {
+            "type": "boolean",
+            "title": "Real Execution Configured"
+          },
+          "feedback_mock_enabled": {
+            "type": "boolean",
+            "title": "Feedback Mock Enabled"
+          }
+        },
+        "type": "object",
+        "required": [
+          "planner_type",
+          "scheduler_type",
+          "real_execution_configured",
+          "feedback_mock_enabled"
+        ],
+        "title": "SystemConfigResponse",
+        "description": "运行配置（前端展示规划模式与调度模式，二者语义分离）。"
       },
       "TargetInput": {
         "properties": {

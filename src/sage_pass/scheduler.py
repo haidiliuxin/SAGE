@@ -336,3 +336,232 @@ class BanditScheduler:
     def _require_statistics(self, strategy_id: str) -> ArmStatistics:
         self._require_arm(strategy_id)
         return self._statistics[strategy_id]
+
+
+class _OrderedSchedulerBase:
+    """fixed / round_robin 共用的预算记账与 Arm 管理。"""
+
+    def __init__(
+        self,
+        arms: Sequence[ArmSpec],
+        *,
+        total_candidate_budget: int,
+        total_time_budget: float,
+        exploration_rounds: int = 1,
+    ) -> None:
+        if not arms:
+            raise ValueError("at least one scheduler arm is required")
+        if total_candidate_budget <= 0 or total_time_budget <= 0:
+            raise ValueError("total budgets must be positive")
+        by_id = {arm.strategy_id: arm for arm in arms}
+        if len(by_id) != len(arms):
+            raise ValueError("strategy_id must be unique")
+        self._arms = by_id
+        self._ordered_ids = tuple(
+            arm.strategy_id
+            for arm in sorted(arms, key=lambda item: (item.priority, item.strategy_id))
+        )
+        self._statistics = {
+            strategy_id: ArmStatistics() for strategy_id in self._ordered_ids
+        }
+        self.total_candidate_budget = total_candidate_budget
+        self.total_time_budget = float(total_time_budget)
+        self.exploration_rounds = exploration_rounds
+        self._next_index = 0
+
+    @property
+    def total_allocated_candidates(self) -> int:
+        return sum(
+            stats.allocated_candidates for stats in self._statistics.values()
+        )
+
+    @property
+    def total_time_cost(self) -> float:
+        return sum(stats.time_cost for stats in self._statistics.values())
+
+    def statistics(self, strategy_id: str) -> ArmStatistics:
+        return replace(self._statistics[strategy_id])
+
+    def snapshot_statistics(self) -> dict[str, dict[str, object]]:
+        return {
+            strategy_id: {
+                "tested": stats.tested,
+                "recovered": stats.recovered,
+                "time_cost": stats.time_cost,
+                "recent_gain": stats.recent_gain,
+                "pulls": stats.pulls,
+                "allocated_candidates": stats.allocated_candidates,
+            }
+            for strategy_id, stats in self._statistics.items()
+        }
+
+    def restore_statistics(
+        self, snapshot: Mapping[str, Mapping[str, object]]
+    ) -> None:
+        for strategy_id, values in snapshot.items():
+            if strategy_id not in self._statistics:
+                continue
+            stats = self._statistics[strategy_id]
+            stats.tested = int(values.get("tested", 0))
+            stats.recovered = int(values.get("recovered", 0))
+            stats.time_cost = float(values.get("time_cost", 0.0))
+            stats.recent_gain = float(values.get("recent_gain", 0.0))
+            stats.pulls = int(values.get("pulls", 0))
+            stats.allocated_candidates = int(
+                values.get("allocated_candidates", 0)
+            )
+
+    def score(self, strategy_id: str, next_batch_size: int) -> ScoreBreakdown:
+        if next_batch_size <= 0:
+            raise ValueError("next_batch_size must be positive")
+        spec = self._arms[strategy_id]
+        stats = self._statistics[strategy_id]
+        cost = min(
+            1.0,
+            stats.time_cost / spec.time_budget if spec.time_budget > 0 else 1.0,
+        )
+        value = -cost + 1.0 / spec.priority
+        return ScoreBreakdown(
+            success_probability=0.0,
+            recent_gain=stats.recent_gain,
+            transfer=spec.transfer,
+            cost=cost,
+            score=value,
+        )
+
+    def observe(
+        self,
+        strategy_id: str,
+        *,
+        candidate_count: int,
+        tested: int,
+        recovered: int,
+        duration: float,
+    ) -> None:
+        stats = self._statistics[strategy_id]
+        stats.pulls += 1
+        stats.allocated_candidates += candidate_count
+        stats.tested += tested
+        stats.recovered += recovered
+        stats.time_cost += duration
+        batch_gain = min(1.0, (recovered * 1_000) / max(tested, 1))
+        stats.recent_gain = (
+            batch_gain
+            if stats.pulls == 1
+            else 0.5 * batch_gain + 0.5 * stats.recent_gain
+        )
+
+    def stop_reason(
+        self, next_batch_sizes: Mapping[str, int]
+    ) -> SchedulerStopReason | None:
+        if self.total_allocated_candidates >= self.total_candidate_budget:
+            return SchedulerStopReason.CANDIDATE_BUDGET
+        if self.total_time_cost >= self.total_time_budget:
+            return SchedulerStopReason.TIME_BUDGET
+        if not any(size > 0 for size in next_batch_sizes.values()):
+            return SchedulerStopReason.CANDIDATES_EXHAUSTED
+        if not any(
+            self._eligible(strategy_id, next_batch_sizes.get(strategy_id, 0))
+            for strategy_id in self._ordered_ids
+        ):
+            return SchedulerStopReason.STRATEGY_BUDGETS
+        return None
+
+    def _eligible(self, strategy_id: str, next_batch_size: int) -> bool:
+        if next_batch_size <= 0:
+            return False
+        spec = self._arms[strategy_id]
+        stats = self._statistics[strategy_id]
+        return (
+            self.total_allocated_candidates < self.total_candidate_budget
+            and self.total_time_cost < self.total_time_budget
+            and stats.allocated_candidates < spec.candidate_budget
+            and stats.time_cost < spec.time_budget
+        )
+
+    def _decision(
+        self, strategy_id: str, next_batch_sizes: Mapping[str, int]
+    ) -> SchedulingDecision:
+        spec = self._arms[strategy_id]
+        stats = self._statistics[strategy_id]
+        limit = min(
+            next_batch_sizes.get(strategy_id, 0),
+            spec.candidate_budget - stats.allocated_candidates,
+            self.total_candidate_budget - self.total_allocated_candidates,
+        )
+        time_limit = min(
+            spec.time_budget - stats.time_cost,
+            self.total_time_budget - self.total_time_cost,
+        )
+        return SchedulingDecision(
+            strategy_id=strategy_id,
+            candidate_limit=max(0, limit),
+            time_limit=max(0.0, time_limit),
+            score=self.score(strategy_id, max(1, limit)),
+            exploration=False,
+        )
+
+
+class FixedOrderScheduler(_OrderedSchedulerBase):
+    """按优先级顺序把一个 Arm 的批次跑完再进入下一个（消融基线）。"""
+
+    def select(self, next_batch_sizes: Mapping[str, int]):
+        for strategy_id in self._ordered_ids:
+            if self._eligible(strategy_id, next_batch_sizes.get(strategy_id, 0)):
+                return self._decision(strategy_id, next_batch_sizes)
+        return None
+
+
+class RoundRobinScheduler(_OrderedSchedulerBase):
+    """各可用 Arm 轮流取一个批次（消融基线）。"""
+
+    def select(self, next_batch_sizes: Mapping[str, int]):
+        count = len(self._ordered_ids)
+        for offset in range(count):
+            index = (self._next_index + offset) % count
+            strategy_id = self._ordered_ids[index]
+            if self._eligible(strategy_id, next_batch_sizes.get(strategy_id, 0)):
+                self._next_index = (index + 1) % count
+                return self._decision(strategy_id, next_batch_sizes)
+        return None
+
+
+def build_scheduler(
+    scheduler_type,
+    arms: Sequence[ArmSpec],
+    *,
+    total_candidate_budget: int,
+    total_time_budget: float,
+    exploration_rounds: int = 1,
+    weights: BanditWeights | None = None,
+):
+    """按调度类型构造策略；B 侧未交付的算法给出明确错误。"""
+    from .enums import SchedulerType
+
+    if scheduler_type == SchedulerType.HEURISTIC_BANDIT:
+        return BanditScheduler(
+            arms,
+            total_candidate_budget=total_candidate_budget,
+            total_time_budget=total_time_budget,
+            exploration_rounds=exploration_rounds,
+            weights=weights,
+        )
+    if scheduler_type == SchedulerType.FIXED:
+        return FixedOrderScheduler(
+            arms,
+            total_candidate_budget=total_candidate_budget,
+            total_time_budget=total_time_budget,
+            exploration_rounds=exploration_rounds,
+        )
+    if scheduler_type == SchedulerType.ROUND_ROBIN:
+        return RoundRobinScheduler(
+            arms,
+            total_candidate_budget=total_candidate_budget,
+            total_time_budget=total_time_budget,
+            exploration_rounds=exploration_rounds,
+        )
+    name = getattr(scheduler_type, "value", str(scheduler_type))
+    raise ValueError(
+        f"调度器 {name} 尚未交付（B 侧）：当前可用 fixed / round_robin / "
+        "heuristic_bandit"
+    )

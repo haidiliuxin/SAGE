@@ -4,11 +4,39 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from .enums import LLMApiStyle, PlannerType
+from .enums import LLMApiStyle, PlannerType, SchedulerType
 
 
 def _as_path(value: str) -> Path:
     return Path(value).expanduser().resolve()
+
+
+def _parse_planner_type(raw: str) -> PlannerType:
+    value = raw.strip().lower()
+    if value == "adaptive":
+        raise RuntimeError(
+            "SAGE_PLANNER_TYPE=adaptive 已弃用：自适应能力位于调度层。"
+            "请改用 SAGE_SCHEDULER_TYPE（fixed / round_robin / "
+            "heuristic_bandit / ucb / cost_aware_ucb / thompson），"
+            "并把 SAGE_PLANNER_TYPE 设为 mock、rule 或 llm。"
+        )
+    try:
+        return PlannerType(value)
+    except ValueError as exc:
+        allowed = ", ".join(item.value for item in PlannerType)
+        raise RuntimeError(
+            f"SAGE_PLANNER_TYPE={raw!r} 不受支持，可选值：{allowed}"
+        ) from exc
+
+
+def _parse_scheduler_type(raw: str) -> SchedulerType:
+    try:
+        return SchedulerType(raw.strip().lower())
+    except ValueError as exc:
+        allowed = ", ".join(item.value for item in SchedulerType)
+        raise RuntimeError(
+            f"SAGE_SCHEDULER_TYPE={raw!r} 不受支持，可选值：{allowed}"
+        ) from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +48,7 @@ class Settings:
     hashcat_path: str = "hashcat"
     zip2john_path: str = "zip2john"
     planner_type: PlannerType = PlannerType.MOCK
+    scheduler_type: SchedulerType = SchedulerType.HEURISTIC_BANDIT
     openai_api_key: str | None = None
     openai_base_url: str | None = None
     llm_api_style: LLMApiStyle = LLMApiStyle.RESPONSES
@@ -53,7 +82,12 @@ class Settings:
             cors_origins=tuple(item.strip() for item in origins.split(",") if item.strip()),
             hashcat_path=os.getenv("SAGE_HASHCAT_PATH", "hashcat"),
             zip2john_path=os.getenv("SAGE_ZIP2JOHN_PATH", "zip2john"),
-            planner_type=PlannerType(os.getenv("SAGE_PLANNER_TYPE", "mock").lower()),
+            planner_type=_parse_planner_type(
+                os.getenv("SAGE_PLANNER_TYPE", "mock")
+            ),
+            scheduler_type=_parse_scheduler_type(
+                os.getenv("SAGE_SCHEDULER_TYPE", "heuristic_bandit")
+            ),
             openai_api_key=os.getenv("OPENAI_API_KEY") or None,
             openai_base_url=os.getenv("OPENAI_BASE_URL") or None,
             llm_api_style=LLMApiStyle(

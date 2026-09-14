@@ -27,7 +27,44 @@ HASHCAT_MODES = {
     "bcrypt": 3200,
     "winzip": 13600,
     "zip-aes": 13600,
+    # Argon2 家族（模式号取自本机 hashcat -hh：34000 Argon2 / 70000 Argon2id bridged）
+    "argon2": 34000,
+    "argon2i": 34000,
+    "argon2d": 34000,
+    "argon2id": 70000,
 }
+
+# 算法别名 -> 规范化名称（保留 '-'/'_' 与大小写差异）
+ALGORITHM_ALIASES = {
+    "md5": "md5",
+    "sha": "sha1",
+    "sha1": "sha1",
+    "sha-1": "sha1",
+    "sha_1": "sha1",
+    "sha256": "sha256",
+    "sha-256": "sha256",
+    "sha_256": "sha256",
+    "sha512": "sha512",
+    "sha-512": "sha512",
+    "sha_512": "sha512",
+    "bcrypt": "bcrypt",
+    "bcrypt-sha256": "bcrypt",
+    "blowfish": "bcrypt",
+    "argon2": "argon2",
+    "argon2i": "argon2i",
+    "argon2d": "argon2d",
+    "argon2id": "argon2id",
+    "winzip": "winzip",
+    "winzip-aes": "zip-aes",
+    "zip-aes": "zip-aes",
+    "zipaes": "zip-aes",
+}
+
+
+def normalize_algorithm_name(algorithm: str) -> str:
+    """把算法名称/别名归一为内部规范名（未知名称原样小写返回）。"""
+    normalized = algorithm.strip().casefold()
+    return ALGORITHM_ALIASES.get(normalized, normalized)
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,7 +96,7 @@ class HashcatResult:
 
 
 def resolve_hashcat_mode(algorithm: str) -> int:
-    normalized = algorithm.strip().lower()
+    normalized = normalize_algorithm_name(algorithm)
     try:
         return HASHCAT_MODES[normalized]
     except KeyError as exc:
@@ -67,7 +104,7 @@ def resolve_hashcat_mode(algorithm: str) -> int:
             "EXECUTION_FAILED",
             "无法自动确定 Hashcat 模式，请显式提供 hashcat_mode",
             status_code=422,
-            details={"algorithm": algorithm},
+            details={"algorithm": algorithm, "normalized": normalized},
         ) from exc
 
 

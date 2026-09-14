@@ -523,7 +523,10 @@ def build_planner(settings: Settings) -> MockPlanner | RulePlanner | LLMPlanner:
     if settings.planner_type == PlannerType.RULE:
         return rule_planner
     if settings.planner_type != PlannerType.LLM:
-        return MockPlanner()
+        raise ValueError(
+            f"不支持的 Planner 类型：{settings.planner_type!r}；"
+            "自适应能力属于调度层（SAGE_SCHEDULER_TYPE）"
+        )
     if not settings.openai_api_key:
         return rule_planner
     gateway_class = (

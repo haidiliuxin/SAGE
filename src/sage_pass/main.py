@@ -53,7 +53,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     application = FastAPI(
         title="SAGE-Pass API",
-        version="0.3.0",
+        version="0.4.0",
         description=(
             "面向异构离线口令安全评测任务的编排 API。支持 mock 与基于 "
             "Hashcat 的真实执行（第二周），并接入 WinZip AES（$zip2$）"
