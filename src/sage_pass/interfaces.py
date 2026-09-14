@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Mapping, Protocol
 
 from .candidate_generator import CandidateBatch
 from .enums import TaskStatus
@@ -136,13 +136,16 @@ class DecisionEvent:
 
 
 class DecisionPolicy(Protocol):
-    """B 负责实现的可替换调度接口（A 只依赖该协议接线）。"""
+    """B 负责实现的可替换调度接口（A 只依赖该协议接线）。
 
-    def initialize(self, arms: Sequence[ArmSpec], **kwargs: Any) -> None: ...
+    以构造函数注入 `arms` 与总预算完成初始化；以下为规范接口，
+    当前 `BanditScheduler`、`FixedOrderScheduler`、`RoundRobinScheduler`
+    均已实现（`observe_outcome` / `snapshot` / `restore` 为规范别名）。
+    """
 
     def select(self, next_batch_sizes: Mapping[str, int]): ...
 
-    def observe(self, arm_id: str, outcome: BatchOutcome) -> None: ...
+    def observe_outcome(self, arm_id: str, outcome: BatchOutcome) -> None: ...
 
     def stop_reason(self, next_batch_sizes: Mapping[str, int]) -> str | None: ...
 

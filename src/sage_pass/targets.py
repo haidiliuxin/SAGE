@@ -80,8 +80,11 @@ class ZipTargetExtractor:
 
     name = "zip"
 
-    def __init__(self, extractor: ZipHashExtractor) -> None:
+    def __init__(
+        self, extractor: ZipHashExtractor, *, timeout: float = 30.0
+    ) -> None:
         self.extractor = extractor
+        self.timeout = timeout
 
     def supports(self, target_type: TargetType) -> bool:
         return target_type == TargetType.ZIP
@@ -101,7 +104,7 @@ class ZipTargetExtractor:
                 status_code=422,
                 details={},
             )
-        extracted = self.extractor.extract(file_path)
+        extracted = self.extractor.extract(file_path, timeout=self.timeout)
         if not extracted.hashes:
             raise AppError(
                 "EXECUTION_FAILED",
@@ -166,12 +169,16 @@ class OfficeTargetExtractor:
 
 
 def build_target_extractors(
-    settings: Settings, *, zip_extractor: ZipHashExtractor | None = None
+    settings: Settings,
+    *,
+    zip_extractor: ZipHashExtractor | None = None,
+    zip_timeout: float = 30.0,
 ) -> tuple[TargetExtractor, ...]:
     return (
         HashTargetExtractor(),
         ZipTargetExtractor(
-            zip_extractor or ZipHashExtractor(settings.zip2john_path)
+            zip_extractor or ZipHashExtractor(settings.zip2john_path),
+            timeout=zip_timeout,
         ),
         PdfTargetExtractor(),
         OfficeTargetExtractor(),

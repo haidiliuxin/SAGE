@@ -36,7 +36,6 @@ from .repository import (
 from .run_control import RunControl
 from .scheduler import (
     ArmSpec,
-    BanditScheduler,
     SchedulerStopReason,
     build_scheduler,
 )
@@ -106,7 +105,7 @@ class _RunState:
     failed_launch: str | None = None
     persist_error: str | None = None
     thread: threading.Thread | None = None
-    scheduler: BanditScheduler | None = None
+    scheduler: Any | None = None
     current_strategy_id: str | None = None
     decision_events: list[DecisionEvent] = field(default_factory=list)
     round_index: int = 0
@@ -549,7 +548,11 @@ class RealExecutor:
     # ------------------------------------------------------------------ 内部
     def _target_extractors(self):
         """按当前实例的 zip 适配器构造提取器链（保持测试可注入 zip_extractor）。"""
-        return build_target_extractors(self.settings, zip_extractor=self.zip_extractor)
+        return build_target_extractors(
+            self.settings,
+            zip_extractor=self.zip_extractor,
+            zip_timeout=ZIP_EXTRACTION_TIMEOUT,
+        )
 
     def _target_file_path(self, session: Session, task: TaskDetail):
         if not task.target.file_id:
@@ -754,7 +757,7 @@ class RealExecutor:
 
     def _record_batch_result(
         self,
-        scheduler: BanditScheduler,
+        scheduler: Any,
         state: _RunState,
         item: _StrategyState,
         candidates: tuple[str, ...],
@@ -1290,7 +1293,7 @@ def _scheduler_from_snapshot(
     snapshot: dict[str, Any],
     progress: dict[str, Any],
     strategies: list[_StrategyState],
-) -> BanditScheduler:
+) -> Any:
     timeout = snapshot.get("timeout_override")
     arms = [
         ArmSpec(
@@ -1373,7 +1376,7 @@ def _record_default_message(status: TaskStatus) -> str:
 
 
 def _decision_scores(
-    scheduler: BanditScheduler, next_batch_sizes: dict[str, int]
+    scheduler: Any, next_batch_sizes: dict[str, int]
 ) -> dict[str, float]:
     """决策前各可用 Arm 的评分快照（写入 DecisionEvent）。"""
     scores: dict[str, float] = {}

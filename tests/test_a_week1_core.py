@@ -484,3 +484,52 @@ def test_target_extractors_cover_hash_zip_pdf_office(tmp_path, monkeypatch):
             )
         assert excinfo.value.status_code == 422
         assert keyword in excinfo.value.message
+
+def test_schedulers_implement_decision_policy_canonical_api():
+    """冻结协议要求的 observe_outcome/snapshot/restore 必须真实可用。"""
+    for scheduler in (
+        BanditScheduler(
+            _arms(), total_candidate_budget=8, total_time_budget=10
+        ),
+        FixedOrderScheduler(
+            _arms(), total_candidate_budget=8, total_time_budget=10
+        ),
+        RoundRobinScheduler(
+            _arms(), total_candidate_budget=8, total_time_budget=10
+        ),
+    ):
+        assert isinstance(scheduler.select({"S1": 2, "S2": 2}), object)
+        outcome = BatchOutcome(
+            run_id="R1",
+            arm_id="S1",
+            strategy_id="S1",
+            batch_index=1,
+            candidate_count=2,
+            tested=2,
+            recovered=1,
+            duration=0.5,
+            status="completed",
+        )
+        scheduler.observe_outcome("S1", outcome)
+        snapshot = scheduler.snapshot()
+        assert snapshot["S1"]["tested"] == 2
+        scheduler.restore(snapshot)
+        assert scheduler.snapshot()["S1"]["recovered"] == 1
+
+
+def test_zip_extractor_honours_configured_timeout(tmp_path):
+    calls = {}
+
+    class _Recorder:
+        def extract(self, path, timeout=30):
+            calls["timeout"] = timeout
+            from sage_pass.zip_adapter import ExtractedZipTarget
+
+            return ExtractedZipTarget(hashes=("$zip2$*0*$/zip2$",))
+
+    archive = tmp_path / "x.zip"
+    archive.write_bytes(b"PK")
+    extractor = ZipTargetExtractor(_Recorder(), timeout=7)
+    result = extractor.extract(target_type=TargetType.ZIP, file_path=archive)
+    assert calls["timeout"] == 7
+    assert result.hashcat_mode == 13600

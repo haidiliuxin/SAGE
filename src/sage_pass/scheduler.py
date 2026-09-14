@@ -167,6 +167,22 @@ class BanditScheduler:
                 values.get("allocated_candidates", 0)
             )
 
+    # --- DecisionPolicy 规范接口（与 interfaces.DecisionPolicy 对齐）---
+    def observe_outcome(self, arm_id: str, outcome) -> None:
+        self.observe(
+            arm_id,
+            candidate_count=outcome.candidate_count,
+            tested=outcome.tested,
+            recovered=outcome.recovered,
+            duration=outcome.duration,
+        )
+
+    def snapshot(self) -> dict[str, dict[str, object]]:
+        return self.snapshot_statistics()
+
+    def restore(self, snapshot: Mapping[str, Mapping[str, object]]) -> None:
+        self.restore_statistics(snapshot)
+
     def score(self, strategy_id: str, next_batch_size: int) -> ScoreBreakdown:
         if next_batch_size <= 0:
             raise ValueError("next_batch_size must be positive")
@@ -410,6 +426,22 @@ class _OrderedSchedulerBase:
             stats.allocated_candidates = int(
                 values.get("allocated_candidates", 0)
             )
+
+    # --- DecisionPolicy 规范接口（与 interfaces.DecisionPolicy 对齐）---
+    def observe_outcome(self, arm_id: str, outcome) -> None:
+        self.observe(
+            arm_id,
+            candidate_count=outcome.candidate_count,
+            tested=outcome.tested,
+            recovered=outcome.recovered,
+            duration=outcome.duration,
+        )
+
+    def snapshot(self) -> dict[str, dict[str, object]]:
+        return self.snapshot_statistics()
+
+    def restore(self, snapshot: Mapping[str, Mapping[str, object]]) -> None:
+        self.restore_statistics(snapshot)
 
     def score(self, strategy_id: str, next_batch_size: int) -> ScoreBreakdown:
         if next_batch_size <= 0:
