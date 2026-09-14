@@ -76,6 +76,12 @@ function remoteFlow(strategyIds = ['S1'], overrides = {}) {
   const handler = async (url, init) => {
     let data
     if (url === '/health') data = { status: 'ok' }
+    else if (url === '/api/system/config') data = {
+      planner_type: 'rule',
+      scheduler_type: 'heuristic_bandit',
+      real_execution_configured: true,
+      feedback_mock_enabled: false,
+    }
     else if (url === '/api/tasks') {
       submitted = JSON.parse(init.body)
       data = { task_id: taskId, status: 'created', created_at: new Date().toISOString() }
@@ -140,6 +146,15 @@ test('execution mode defaults to mock and can be switched to real', async (t) =>
   await act(async () => form.select('执行模式').props.onChange({ target: { value: 'real' } }))
   await form.submit()
   assert.deepEqual(remote.execution(), { mode: 'real' })
+})
+
+test('sidebar shows planner and scheduler modes separately', async (t) => {
+  const remote = remoteFlow()
+  const form = await openForm(t, remote.handler)
+  await act(async () => { await Promise.resolve() })
+  const footer = form.renderer.root.findAllByType('p').map((node) => text(node)).join(' ')
+  assert.match(footer, /规划 规则规划/)
+  assert.match(footer, /调度 启发式 Bandit/)
 })
 
 for (const ids of [['S1'], ['S1', 'S4']]) {

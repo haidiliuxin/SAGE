@@ -31,6 +31,7 @@ from .schemas import (
     RunResult,
     RunStatus,
     StrategyPlan,
+    SystemConfigResponse,
     TaskCreate,
     TaskCreated,
     TaskDetail,
@@ -323,6 +324,13 @@ def get_run_status(
             session, status_result.task_id, status_result.status
         )
         return status_result
+    if real_executor.has_record(run_id):
+        # 重启后：真实运行的持久化状态优先于 Mock 分支。
+        status_result = real_executor.load_persisted_status(run_id)
+        _sync_task_status_after_run(
+            session, status_result.task_id, status_result.status
+        )
+        return status_result
     status_result = MockExecutor(session, control=control).status(run_id)
     if status_result.status == TaskStatus.COMPLETED:
         _sync_task_status_after_run(
@@ -345,6 +353,11 @@ def get_run_result(
         result = real_executor.result(run_id)
         _sync_task_status_after_run(session, result.task_id, result.status)
         return result
+    if real_executor.has_record(run_id):
+        # 重启后：从持久化运行记录重建真实结果，不能被 Mock 分支覆盖。
+        result = real_executor.load_persisted_result(run_id)
+        _sync_task_status_after_run(session, result.task_id, result.status)
+        return result
     result = MockExecutor(session).result(run_id)
     _sync_task_status_after_run(session, result.task_id, TaskStatus.COMPLETED)
     if request.app.state.settings.feedback_enable_mock:
@@ -361,6 +374,21 @@ def get_run_result(
                 type(exc).__name__,
             )
     return result
+
+
+@router.get(
+    "/system/config",
+    response_model=SystemConfigResponse,
+    tags=["system"],
+)
+def get_system_config(request: Request) -> SystemConfigResponse:
+    settings = request.app.state.settings
+    return SystemConfigResponse(
+        planner_type=settings.planner_type,
+        scheduler_type=settings.scheduler_type,
+        real_execution_configured=bool(settings.hashcat_path),
+        feedback_mock_enabled=settings.feedback_enable_mock,
+    )
 
 
 @router.get(

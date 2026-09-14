@@ -9,9 +9,23 @@ export type TaskStatus =
   | 'cancelled'
 
 export type TargetType = 'hash' | 'zip' | 'pdf' | 'office' | 'unknown'
-export type PlannerType = 'mock' | 'rule' | 'llm' | 'adaptive'
+export type PlannerType = 'mock' | 'rule' | 'llm'
+export type SchedulerType =
+  | 'fixed'
+  | 'round_robin'
+  | 'heuristic_bandit'
+  | 'ucb'
+  | 'cost_aware_ucb'
+  | 'thompson'
 export type ExecutionMode = 'mock' | 'real'
 export type StrategyId = 'S1' | 'S2' | 'S3' | 'S4' | 'S5'
+
+export interface SystemConfig {
+  planner_type: PlannerType
+  scheduler_type: SchedulerType
+  real_execution_configured: boolean
+  feedback_mock_enabled: boolean
+}
 
 export interface TaskInput {
   name: string

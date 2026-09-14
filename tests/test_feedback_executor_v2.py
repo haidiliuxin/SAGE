@@ -76,7 +76,7 @@ class _StaticS5Planner:
     def plan(self, prir):
         return StrategyPlan(
             task_id=prir.task_id,
-            planner_type=PlannerType.ADAPTIVE,
+            planner_type=PlannerType.RULE,
             total_time_budget=20,
             strategies=[
                 StrategyItem(

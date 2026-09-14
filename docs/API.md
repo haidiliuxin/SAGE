@@ -1,9 +1,9 @@
-# SAGE-Pass 统一接口（Feedback Engine v2）
+# SAGE-Pass 统一接口（A 两周冲刺 · 第 1 周）
 
-版本：`0.3.0`
+版本：`0.4.0`
 基础地址：`http://127.0.0.1:8000`
 
-本文把团队提供的《统一接口.docx》落实为当前后端契约，并记录真实执行、执行控制和 Bandit 自适应调度能力。字段定义的机器可读版本见同目录 `openapi.json`；运行服务后也可在 `/docs` 联调。
+本文把团队提供的《统一接口.docx》落实为当前后端契约，并记录真实执行、执行控制、Bandit 自适应调度、Feedback/S5，以及 A 冲刺第 1 周的算法识别链、Argon2、调度模式与跨重启结果查询。字段定义的机器可读版本见同目录 `openapi.json`；运行服务后也可在 `/docs` 联调。
 
 ## 统一约定
 
@@ -13,8 +13,57 @@
 - 目标类型：`hash`、`zip`、`pdf`、`office`、`unknown`。
 - 验证成本：`low`、`medium`、`high`、`unknown`。
 - 策略编号：`S1`、`S2`、`S3`、`S4`、`S5`。
-- 执行模式：`mock`（第一周链路，保留）与 `real`（第 2 周真实执行）。
+- 执行模式：`mock`（第一周链路，保留）与 `real`（真实执行）。
+- 规划模式：`mock`、`rule`、`llm`（`adaptive` 已弃用，见下）。
+- 调度模式：`fixed`、`round_robin`、`heuristic_bandit`（`ucb`、`cost_aware_ucb`、`thompson` 由 B 侧交付）。
 - 无法确定的字段使用 `null` 或 `unknown`，不得编造。
+
+## A 冲刺第 1 周要点
+
+### 算法识别链（真实执行模式判定顺序）
+
+```text
+ExecutionRequest.hashcat_mode
+  → Task.known_algorithm
+  → PRIR.algorithm（Analyzer 识别结果）
+  → 422 报错（提示可显式提供 hashcat_mode）
+```
+
+- 算法名称统一归一：`SHA-1`/`sha_1` → `sha1`，`sha-256` → `sha256`，`WinZip-AES` → `zip-aes`，`Argon2id` → `argon2id`；
+- 未填写 `known_algorithm` 时，Analyzer 识别出的 MD5/SHA/bcrypt/Argon2 可直接进入真实执行；
+- 未知算法仍可用显式 `hashcat_mode` 覆盖。
+
+### Argon2
+
+- 变体识别：`$argon2id$` → `argon2id`、`$argon2i$` → `argon2i`、`$argon2d$` → `argon2d`，其余 `$argon2` → `argon2`；
+- Hashcat 模式：`argon2` / `argon2i` / `argon2d` = `34000`，`argon2id` = `70000`（依据本机 `hashcat -hh`）；
+- 参数化 Hash 行（含 `v=19$m=...,t=...,p=...`）完整透传，不做切分或截断；
+- 验收：前端不填写 Hashcat 模式，仅提交 Argon2 Hash，即可完成 Analyzer → Planner → RealExecutor 全链路。
+
+### 调度模式（修正 adaptive 语义）
+
+- `POST /execute` 的真实执行仍读取规划结果，但“自适应”属于调度层：
+  `SAGE_SCHEDULER_TYPE` ∈ `fixed` / `round_robin` / `heuristic_bandit` / `ucb` / `cost_aware_ucb` / `thompson`；
+- 当前可用：`fixed`（按优先级跑完一个 Arm 再下一个）、`round_robin`（轮流取批）、`heuristic_bandit`（默认，评分选择）；
+- `ucb` / `cost_aware_ucb` / `thompson` 尚未交付，配置后启动真实执行会返回明确 `422`，不会静默回退；
+- `SAGE_PLANNER_TYPE=adaptive` 已弃用：会在配置解析阶段抛出明确迁移错误（提示改用 `SAGE_SCHEDULER_TYPE`），不再静默回退 Mock；
+- `GET /api/system/config` 返回 `planner_type` 与 `scheduler_type`，前端据此把“自适应”显示为**调度模式**。
+
+### 公共接口（冻结）
+
+`src/sage_pass/interfaces.py` 集中导出：`ArmSpec`（调度臂）、`CandidateBatch`（候选批次）、`BatchOutcome`（执行反馈）、`InformationProfile`（信息条件）、`DecisionEvent`（调度决策日志）与 `DecisionPolicy` 协议。
+约定：`arm_id` 与 `strategy_id` 分离；Scheduler 只面向 Arm；Executor 只接收候选并返回 `BatchOutcome`；研究日志不记录恢复明文。
+
+### 目标提取器（TargetExtractor）
+
+- 统一接口：`supports(target_type)` + `extract(target_type, content, file_path) -> ExtractedTarget`；
+- 已实现：`HashTargetExtractor`（行内 Hash）、`ZipTargetExtractor`（zip2john → `$zip2$`，模式 13600）；
+- `PdfTargetExtractor` / `OfficeTargetExtractor`：本阶段返回明确 `422`（下一阶段交付，不静默降级）。
+
+### 已完成真实运行的跨重启查询
+
+`/runs/{run_id}/status` 与 `/runs/{run_id}/result` 的解析顺序：内存 registry → `RunRecordModel` 持久化记录（重建真实 tested/recovered/time 与 recovered_items）→ Mock StrategyRun。
+因此服务重启后仍能查询已完成真实运行的原始结果，且不会被 MockExecutor 覆盖；损坏/不兼容记录返回明确错误。
 
 ## 基础 HTTP API
 

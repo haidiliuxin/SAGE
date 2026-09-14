@@ -44,6 +44,16 @@ total = len(candidates)
 if slow:
     time.sleep(slow)
 
+log_path = os.environ.get("FAKE_HASHCAT_LOG", "")
+if log_path:
+    with open(log_path, "a", encoding="utf-8") as lf:
+        lf.write(json.dumps({
+            "argv": sys.argv[1:],
+            "hash_type": arg_value("--hash-type"),
+            "targets": targets,
+            "candidate_count": total,
+        }, ensure_ascii=False) + "\n")
+
 print(json.dumps({"progress": [total, 0], "percent": 100}))
 sys.stdout.flush()
 

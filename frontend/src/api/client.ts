@@ -6,6 +6,7 @@ import type {
   RunResult,
   RunStatus,
   StrategyPlan,
+  SystemConfig,
   TaskCreated,
   TaskDetail,
   TaskListResponse,
@@ -98,5 +99,9 @@ export const api = {
 
   getResult(runId: string) {
     return request<RunResult>(`/api/runs/${runId}/result`)
+  },
+
+  getSystemConfig() {
+    return request<SystemConfig>('/api/system/config')
   },
 }
