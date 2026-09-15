@@ -40,6 +40,20 @@ SAGE-Pass 是面向异构离线口令安全评测任务的智能策略编排系�
 - Rule Planner：无上下文按 S1→S2→S3，有上下文追加 S4；慢 Hash 将上下文高概率策略提前并限制候选池规模；
 - pytest 覆盖任务、文件、状态机、候选生成、适配器、Mock/Real 执行、Bandit 评分、预算停止和策略统计链路。
 
+## B 决策模型与离线回放
+
+第一至第三步交付说明见 [B 阶段交接](docs/handoff/b-milestone1-3.md)，包含
+[接口对齐方案](docs/decision/interface-alignment.md)和
+[数学模型](docs/decision/mathematical-model.md)。离线回放复用 fixed、round_robin、
+heuristic_bandit，支持候选去重、双预算、目标级收益、完整轨迹和批次边界恢复。
+本阶段代码尚待使用方运行测试，未接入新的真实执行路径。
+
+在已安装项目的环境中比较三个基线：
+
+```powershell
+python -m sage_pass.experiments --scenario examples/replay/baseline-small.json --output data/replay/baseline-comparison.json
+```
+
 ## 本地启动
 
 PowerShell：

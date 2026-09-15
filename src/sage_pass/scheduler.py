@@ -547,6 +547,22 @@ class FixedOrderScheduler(_OrderedSchedulerBase):
 class RoundRobinScheduler(_OrderedSchedulerBase):
     """各可用 Arm 轮流取一个批次（消融基线）。"""
 
+    def snapshot(self) -> dict[str, dict[str, object]]:
+        snapshot = self.snapshot_statistics()
+        snapshot["__round_robin__"] = {"next_index": self._next_index}
+        return snapshot
+
+    def restore(self, snapshot: Mapping[str, Mapping[str, object]]) -> None:
+        # Preserve the legacy statistics-only input for existing callers.
+        metadata = snapshot.get("__round_robin__", {})
+        index = metadata.get("next_index", 0)
+        if type(index) is not int or not 0 <= index < len(self._ordered_ids):
+            raise ValueError("invalid round-robin cursor")
+        self.restore_statistics({
+            key: value for key, value in snapshot.items() if key != "__round_robin__"
+        })
+        self._next_index = index
+
     def select(self, next_batch_sizes: Mapping[str, int]):
         count = len(self._ordered_ids)
         for offset in range(count):
