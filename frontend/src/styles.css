@@ -200,6 +200,10 @@ main { grid-column: 2; min-width: 0; }
 .recovered-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; align-items: center; padding: 13px 1px; border-bottom: 1px solid #e8e9e4; }
 .recovered-plaintext { font: 500 13px Consolas, 'SFMono-Regular', monospace; color: #2f4033; background: #eef2ea; padding: 5px 9px; border-radius: 4px; overflow-wrap: anywhere; }
 .recovered-target { grid-column: 1 / -1; color: #9a9c97; font-size: 7px; overflow-wrap: anywhere; }
+.checkbox-row { display: flex !important; align-items: center; gap: 8px; }
+.checkbox-row input { width: auto; }
+.checkbox-row span { font-size: 9px; color: #4f6253; }
+.wordlist-box { margin-top: 12px; }
 
 .tasks-page .page-title { align-items: center; }
 .table-shell { margin-top: 34px; border: 1px solid var(--line); background: #fafaf7; }

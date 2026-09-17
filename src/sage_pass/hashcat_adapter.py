@@ -94,9 +94,21 @@ class HashcatJob:
     run_id: str
     target_hashes: tuple[str, ...]
     hash_mode: int
-    candidates: tuple[str, ...]
-    timeout_seconds: float
-    candidate_budget: int
+    candidates: tuple[str, ...] = ()
+    timeout_seconds: float = 60.0
+    candidate_budget: int = 0
+    # 原生攻击：直接交给 hashcat 自己枚举，不经过 Python 候选列表。
+    # attack_mode 0 = 词表（可配 rules_path），3 = 掩码，6/7 = 混合攻击。
+    attack_mode: int = 0
+    wordlist_path: Path | None = None
+    rules_path: Path | None = None
+    mask: str | None = None
+    # 原生攻击无法预先知道候选规模，用该值作为进度换算与预算上限的估计。
+    candidate_estimate: int | None = None
+
+    @property
+    def is_native(self) -> bool:
+        return self.wordlist_path is not None or self.mask is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,19 +140,61 @@ class HashcatHandle:
     def __init__(self, command: Sequence[str], job: HashcatJob) -> None:
         # 校验必须先于任何资源创建，避免异常路径遗留临时目录。
         targets = _validated_lines(job.target_hashes, "target_hashes")
-        candidates = _validated_lines(
-            job.candidates[: job.candidate_budget], "candidates"
-        )
         if not targets:
             raise AppError(
                 "EXECUTION_FAILED", "Hashcat 目标为空", status_code=422, details={}
             )
-        if not candidates:
-            raise AppError(
-                "EXECUTION_FAILED", "真实执行候选集为空", status_code=422, details={}
+        native = job.is_native
+        candidates: tuple[str, ...] = ()
+        # hashcat 的位置参数顺序固定为「目标文件 词表/掩码」，因此把词表与掩码
+        # 单独收集，最后拼接在目标文件之后。
+        attack_options: list[str] = ["--attack-mode", str(job.attack_mode)]
+        attack_positional: list[str] = []
+        if native:
+            if job.wordlist_path is None and job.mask is None:
+                raise AppError(
+                    "EXECUTION_FAILED",
+                    "原生攻击缺少词表或掩码",
+                    status_code=422,
+                    details={},
+                )
+            if job.wordlist_path is not None:
+                wordlist = Path(job.wordlist_path).expanduser()
+                if not wordlist.is_file():
+                    raise AppError(
+                        "EXECUTION_FAILED",
+                        "词表文件不存在，请检查 SAGE_WORDLIST_PATH",
+                        status_code=422,
+                        details={"wordlist": str(wordlist)},
+                    )
+                attack_positional.append(str(wordlist))
+            if job.rules_path is not None:
+                rules = Path(job.rules_path).expanduser()
+                if not rules.is_file():
+                    raise AppError(
+                        "EXECUTION_FAILED",
+                        "hashcat 规则文件不存在",
+                        status_code=422,
+                        details={"rules": str(rules)},
+                    )
+                attack_options.extend(["--rules-file", str(rules)])
+            if job.mask is not None:
+                attack_positional.append(job.mask)
+        else:
+            candidates = _validated_lines(
+                job.candidates[: job.candidate_budget], "candidates"
             )
+            if not candidates:
+                raise AppError(
+                    "EXECUTION_FAILED", "真实执行候选集为空", status_code=422, details={}
+                )
         self.job = job
-        self.candidate_count = len(candidates)
+        self.native = native
+        self.candidate_count = (
+            int(job.candidate_estimate or job.candidate_budget or 1)
+            if native
+            else len(candidates)
+        )
         self._lock = threading.RLock()
         self._started = time.monotonic()
         self._stop_reason: str | None = None
@@ -153,7 +207,10 @@ class HashcatHandle:
         self._stdout_path = working_dir / "stdout.log"
         self._stderr_path = working_dir / "stderr.log"
         self._target_path.write_text("\n".join(targets) + "\n", encoding="utf-8")
-        self._wordlist_path.write_text("\n".join(candidates) + "\n", encoding="utf-8")
+        if candidates:
+            self._wordlist_path.write_text(
+                "\n".join(candidates) + "\n", encoding="utf-8"
+            )
         self._stdout_file = self._stdout_path.open("wb")
         self._stderr_file = self._stderr_path.open("wb")
 
@@ -161,8 +218,7 @@ class HashcatHandle:
             *command,
             "--hash-type",
             str(job.hash_mode),
-            "--attack-mode",
-            "0",
+            *attack_options,
             "--session",
             _safe_session_name(job.run_id),
             "--runtime",
@@ -180,7 +236,7 @@ class HashcatHandle:
             "--separator",
             "\t",
             str(self._target_path),
-            str(self._wordlist_path),
+            *(attack_positional if native else [str(self._wordlist_path)]),
         ]
         try:
             # hashcat 的 OpenCL 内核目录按进程工作目录解析（./OpenCL/），
@@ -277,8 +333,14 @@ class HashcatHandle:
         recovered = _parse_outfile(self._outfile_path)
         tested = _parse_progress(stdout)
         if tested is None:
-            tested = self.candidate_count if exit_code == 1 else len(recovered)
-        tested = min(max(tested, len(recovered)), self.candidate_count)
+            tested = (
+                len(recovered)
+                if self.native
+                else (self.candidate_count if exit_code == 1 else len(recovered))
+            )
+        tested = max(tested, len(recovered))
+        if not self.native:
+            tested = min(tested, self.candidate_count)
 
         if self._stop_reason == "cancelled":
             status = TaskStatus.CANCELLED
@@ -318,10 +380,17 @@ class HashcatAdapter:
             raise ValueError("Hashcat command cannot be empty")
 
     def start(self, job: HashcatJob) -> HashcatHandle:
-        if job.timeout_seconds <= 0 or job.candidate_budget <= 0:
+        if job.timeout_seconds <= 0:
             raise AppError(
                 "BUDGET_EXCEEDED",
-                "时间预算和候选预算必须大于 0",
+                "时间预算必须大于 0",
+                status_code=422,
+                details={},
+            )
+        if not job.is_native and job.candidate_budget <= 0:
+            raise AppError(
+                "BUDGET_EXCEEDED",
+                "候选预算必须大于 0",
                 status_code=422,
                 details={},
             )

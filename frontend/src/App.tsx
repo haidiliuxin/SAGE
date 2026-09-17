@@ -191,6 +191,17 @@ function fileAccept(targetType: TargetType) {
   return undefined
 }
 
+const MAX_SUPPLIED_CANDIDATES = 100_000
+
+/** 解析粘贴或导入的候选词表：每行一个，去空行、去重、按接口上限截断。 */
+export function parseCandidateList(text: string): string[] {
+  const values = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && line.length <= 1024)
+  return Array.from(new Set(values)).slice(0, MAX_SUPPLIED_CANDIDATES)
+}
+
 function App() {
   const [view, setView] = useState<View>(() => new URLSearchParams(window.location.hash.slice(1)).has('run') ? 'workspace' : 'overview')
   const [researchRunId, setResearchRunId] = useState<string | null>(() => new URLSearchParams(window.location.hash.slice(1)).get('run'))
@@ -201,6 +212,8 @@ function App() {
   const [yearText, setYearText] = useState(blankInput.context.years.join('，'))
   const [interestText, setInterestText] = useState('')
   const [historicalPasswordText, setHistoricalPasswordText] = useState('')
+  const [candidateText, setCandidateText] = useState('')
+  const [stopOnHit, setStopOnHit] = useState(false)
   const [file, setFile] = useState<File | null>(null)
   const [stage, setStage] = useState<FlowStage>('idle')
   const [snapshot, setSnapshot] = useState<FlowSnapshot>(initialSnapshot)
@@ -452,7 +465,10 @@ function App() {
       }))
 
       setStage('executing')
-      const run = await api.execute(task.task_id, executionMode)
+      const run = await api.execute(task.task_id, executionMode, {
+        candidates: parseCandidateList(candidateText),
+        stop_on_hit: stopOnHit,
+      })
       if (token !== runToken.current) return
       setResearchRunId(run.run_id)
       window.history.replaceState(null, '', `#run=${encodeURIComponent(run.run_id)}`)
@@ -636,7 +652,10 @@ function App() {
                   <label><span>时间预算 <em>秒</em></span><input type="number" min="1" value={form.time_budget} onChange={(e) => updateForm('time_budget', Number(e.target.value))} required /></label>
                   <label><span>候选预算 <em>个</em></span><input type="number" min="1" value={form.candidate_budget} onChange={(e) => updateForm('candidate_budget', Number(e.target.value))} required /></label>
                   <label><span>执行模式</span><select value={executionMode} onChange={(e) => setExecutionMode(e.target.value as ExecutionMode)}><option value="mock">Mock 模拟执行</option><option value="real">Real 本机 Hashcat</option></select></label>
+                  <label className="wide checkbox-row"><input type="checkbox" checked={stopOnHit} onChange={(e) => setStopOnHit(e.target.checked)} /><span>命中即停（恢复目标后立即结束，不再消耗剩余候选）</span></label>
                 </div>
+                <label className="wide"><span>补充候选词表 <em>每行一个，最多 10 万条</em></span><textarea rows={3} value={candidateText} onChange={(e) => setCandidateText(e.target.value)} placeholder="粘贴字典或常见口令；也可用下方按钮导入 .txt 词表文件" /></label>
+                <label className="upload-box wordlist-box"><input type="file" accept=".txt,.dic,.lst" onChange={async (e) => { const picked = e.target.files?.[0]; if (picked) setCandidateText(await picked.text()) }} /><span className="upload-icon"><Icon name="upload" /></span><strong>导入词表文件（.txt / .dic / .lst）</strong><small>在浏览器端读取，作为高优先级候选提交给后端；超大字典请放到服务器并配置 SAGE_WORDLIST_PATH</small></label>
               </div>
 
               <div className="form-section">

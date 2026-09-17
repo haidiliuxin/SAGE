@@ -5,6 +5,7 @@ import time
 import logging
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -98,6 +99,9 @@ class _StrategyState:
     consumed_batches: int = 0
     time_cost: float = 0.0
     transfer_score: float | None = None
+    # 原生词表攻击：直接让 hashcat 读整本字典（单进程、不经过 Python 候选列表）。
+    native_wordlist_path: Path | None = None
+    native_pending: bool = False
 
 
 @dataclass
@@ -124,6 +128,7 @@ class _RunState:
     research: ResearchRecorder | None = None
     research_previous_arm: str | None = None
     research_stop_reason: str | None = None
+    stop_on_hit: bool = False
 
 
 class RealExecutor:
@@ -318,6 +323,7 @@ class RealExecutor:
         started_at = now_iso()
         run_id = public_id("R")
         batches_by_strategy: dict[str, list[CandidateBatch]] = {}
+        native_wordlist = self._native_wordlist_path()
         prir_model = PRIRRepository(session).get(task.task_id)
         transfer_patterns, knowledge_summary = load_transfer_knowledge(
             PatternKnowledgeRepository(session),
@@ -333,6 +339,7 @@ class RealExecutor:
                 task_context=task.context,
                 historical_passwords=task.historical_passwords,
                 transfer_patterns=transfer_patterns,
+                batch_size=self.settings.decision_batch_size,
             ):
                 batches_by_strategy.setdefault(
                     batch.strategy_id.value, []
@@ -376,9 +383,21 @@ class RealExecutor:
                         if item.strategy_id.value == "S5"
                         else None
                     ),
+                    native_wordlist_path=(
+                        native_wordlist
+                        if (
+                            native_wordlist is not None
+                            and item.strategy_id == StrategyId.S1
+                        )
+                        else None
+                    ),
+                    native_pending=(
+                        native_wordlist is not None
+                        and item.strategy_id == StrategyId.S1
+                    ),
                 )
             )
-        if expected == 0:
+        if expected == 0 and native_wordlist is None:
             raise AppError(
                 "EXECUTION_FAILED",
                 "后端未能为策略计划生成候选，无法启动真实执行",
@@ -403,6 +422,11 @@ class RealExecutor:
                 item.strategy_id: item.transfer_score for item in strategies
             },
             scheduler_type=self.settings.scheduler_type.value,
+            stop_on_hit=(
+                payload.stop_on_hit
+                if payload.stop_on_hit is not None
+                else self.settings.stop_on_hit
+            ),
         )
         # Freeze reward configuration with the run; a later service default
         # must not change the interpretation of resumed batches.
@@ -462,6 +486,11 @@ class RealExecutor:
             started_at=started_at,
             expected_candidates=expected,
             scheduler=scheduler,
+            stop_on_hit=(
+                payload.stop_on_hit
+                if payload.stop_on_hit is not None
+                else self.settings.stop_on_hit
+            ),
         )
         with self._lock:
             self._registry[run_id] = state
@@ -620,6 +649,21 @@ class RealExecutor:
             zip_timeout=ZIP_EXTRACTION_TIMEOUT,
         )
 
+    def _native_wordlist_path(self) -> Path | None:
+        """配置了 SAGE_WORDLIST_PATH 时，S1 走 hashcat 原生词表攻击（单进程读整本字典）。"""
+        configured = self.settings.wordlist_path
+        if configured is None:
+            return None
+        path = Path(configured).expanduser()
+        if not path.is_file():
+            raise AppError(
+                "EXECUTION_FAILED",
+                "SAGE_WORDLIST_PATH 指向的词表文件不存在",
+                status_code=422,
+                details={"wordlist": str(path)},
+            )
+        return path
+
     def _target_file_path(self, session: Session, task: TaskDetail):
         if not task.target.file_id:
             return None
@@ -753,8 +797,12 @@ class RealExecutor:
                 return
 
             item = by_strategy[decision.strategy_id]
-            source_batch = item.candidate_batches[item.next_batch_index]
-            candidates = source_batch[: decision.candidate_limit]
+            if item.native_wordlist_path is not None:
+                # 原生词表攻击：不经过 Python 候选，hashcat 自己读整本字典。
+                candidates: tuple[str, ...] = ()
+            else:
+                source_batch = item.candidate_batches[item.next_batch_index]
+                candidates = source_batch[: decision.candidate_limit]
             item.next_batch_index += 1
             item.scheduled_batches += 1
             state.round_index += 1
@@ -768,19 +816,37 @@ class RealExecutor:
             with self._lock:
                 state.current_strategy_id = item.strategy_id
             try:
-                handle = self.hashcat.start(
-                    HashcatJob(
-                        run_id=(
-                            f"{state.run_id}-{item.strategy_id}-"
-                            f"{item.scheduled_batches}"
-                        ),
-                        target_hashes=state.targets,
-                        hash_mode=state.hash_mode,
-                        candidates=candidates,
-                        timeout_seconds=decision.time_limit,
-                        candidate_budget=len(candidates),
+                if item.native_wordlist_path is not None:
+                    handle = self.hashcat.start(
+                        HashcatJob(
+                            run_id=(
+                                f"{state.run_id}-{item.strategy_id}-"
+                                f"{item.scheduled_batches}"
+                            ),
+                            target_hashes=state.targets,
+                            hash_mode=state.hash_mode,
+                            timeout_seconds=decision.time_limit,
+                            candidate_budget=0,
+                            attack_mode=0,
+                            wordlist_path=item.native_wordlist_path,
+                            candidate_estimate=item.candidate_budget,
+                        )
                     )
-                )
+                    item.native_pending = False
+                else:
+                    handle = self.hashcat.start(
+                        HashcatJob(
+                            run_id=(
+                                f"{state.run_id}-{item.strategy_id}-"
+                                f"{item.scheduled_batches}"
+                            ),
+                            target_hashes=state.targets,
+                            hash_mode=state.hash_mode,
+                            candidates=candidates,
+                            timeout_seconds=decision.time_limit,
+                            candidate_budget=len(candidates),
+                        )
+                    )
             except AppError as exc:
                 with self._lock:
                     state.current_strategy_id = None
@@ -839,6 +905,13 @@ class RealExecutor:
                 return
             item.consumed_batches += 1
             self._checkpoint(state)
+            if state.stop_on_hit and outcome.recovered > 0:
+                # 命中即停：真实破解语义，命中后不再消耗剩余候选。
+                self._complete_scheduled_execution(
+                    state, None, label="all_targets_recovered"
+                )
+                state.failed_launch = ""
+                return
             if state.cancel_requested:
                 self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
                 return
@@ -861,12 +934,15 @@ class RealExecutor:
             if credential.target in state.targets
         } - already_recovered
         item.time_cost += result.duration
+        # 原生攻击（词表/掩码）没有 Python 候选列表，用实测数量作为提交量，
+        # 保证调度器收到正的候选计数。
+        candidate_count = len(candidates) if candidates else max(result.tested, 1)
         outcome = BatchOutcome(
             run_id=state.run_id,
             arm_id=item.strategy_id,
             strategy_id=item.strategy_id,
             batch_index=item.scheduled_batches,
-            candidate_count=len(candidates),
+            candidate_count=candidate_count,
             tested=result.tested,
             recovered=len(new_targets),
             duration=result.duration,
@@ -1069,6 +1145,7 @@ class RealExecutor:
                 snapshot.get("expected_candidates", 0)
             ),
             scheduler=scheduler,
+            stop_on_hit=bool(snapshot.get("stop_on_hit", False)),
             round_index=int(progress.get(
                 "round_index", sum(item.consumed_batches for item in strategies)
             )),
@@ -1116,16 +1193,24 @@ class RealExecutor:
         self,
         state: _RunState,
         reason: SchedulerStopReason | None,
+        *,
+        label: str | None = None,
     ) -> None:
-        state.research_stop_reason = reason.value if reason is not None else "completed"
+        state.research_stop_reason = (
+            label or (reason.value if reason is not None else "completed")
+        )
         finished_at = now_iso()
         for item in state.strategies:
             if item.status != TaskStatus.RUNNING.value:
                 continue
             item.status = TaskStatus.COMPLETED.value
             item.finished_at = finished_at
-            if not item.candidate_batches:
+            if not item.candidate_batches and item.native_wordlist_path is None:
                 item.message = "该策略未生成候选，无需执行"
+            elif label == "all_targets_recovered":
+                item.message = (
+                    f"命中即停：已恢复 {item.recovered} 项，停止后续候选"
+                )
             elif reason == SchedulerStopReason.TIME_BUDGET:
                 item.message = "已达到任务时间预算"
             elif reason == SchedulerStopReason.CANDIDATE_BUDGET:
@@ -1325,6 +1410,7 @@ def _serialize_snapshot(
     total_candidate_budget: int,
     transfer_scores: dict[str, float | None] | None = None,
     scheduler_type: str = SchedulerType.HEURISTIC_BANDIT.value,
+    stop_on_hit: bool = False,
 ) -> dict[str, Any]:
     """启动时写入运行记录的静态快照（目标、计划、候选批次等）。"""
     return {
@@ -1333,6 +1419,7 @@ def _serialize_snapshot(
         "hash_mode": hash_mode,
         "expected_candidates": expected,
         "timeout_override": payload.timeout,
+        "stop_on_hit": bool(stop_on_hit),
         "scheduler_type": scheduler_type,
         "plan": {
             "total_time_budget": plan.total_time_budget,
@@ -1613,8 +1700,18 @@ def _strategy_result_time(item: _StrategyState) -> float:
 
 def _next_batch_sizes(
     strategies: list[_StrategyState],
-) -> dict[str, int]:    return {
+) -> dict[str, int]:
+    return {
         item.strategy_id: (
+            item.candidate_budget
+            if (
+                item.native_wordlist_path is not None
+                and item.native_pending
+            )
+            else 0
+        )
+        if item.native_wordlist_path is not None
+        else (
             len(item.candidate_batches[item.next_batch_index])
             if item.next_batch_index < len(item.candidate_batches)
             else 0

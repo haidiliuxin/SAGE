@@ -23,7 +23,7 @@ async function loadSource(relativePath) {
   return import('data:text/javascript;base64,' + Buffer.from(compiled.outputFiles[0].text).toString('base64'))
 }
 
-const { default: App } = await loadSource('../src/App.tsx')
+const { default: App, parseCandidateList } = await loadSource('../src/App.tsx')
 const { parseContextLists, parseHistoricalPasswords } = await loadSource('../src/context-input.ts')
 const { ResearchPanel, TaskRuns } = await loadSource('../src/ResearchPanel.tsx')
 
@@ -159,7 +159,29 @@ test('execution mode defaults to mock and can be switched to real', async (t) =>
   assert.equal(form.select('执行模式').props.value, 'mock')
   await act(async () => form.select('执行模式').props.onChange({ target: { value: 'real' } }))
   await form.submit()
-  assert.deepEqual(remote.execution(), { mode: 'real' })
+  assert.deepEqual(remote.execution(), { mode: 'real', candidates: [], stop_on_hit: false })
+})
+
+test('candidate wordlist is parsed, deduplicated and submitted with the run', () => {
+  assert.deepEqual(parseCandidateList('alpha\n\n beta \nalpha\n'), ['alpha', 'beta'])
+  assert.deepEqual(parseCandidateList('x'.repeat(1025) + '\nok'), ['ok'])
+  assert.deepEqual(parseCandidateList(''), [])
+})
+
+test('pasted wordlist and stop-on-hit reach the execute request', async (t) => {
+  const remote = remoteFlow()
+  const form = await openForm(t, remote.handler)
+  const wordlist = form.renderer.root.findAllByType('label').find((node) => text(node).startsWith('补充候选词表'))
+  await act(async () => wordlist.findByType('textarea').props.onChange({ target: { value: 'hunter2\nletmein\nhunter2' } }))
+  const stopOnHit = form.renderer.root.findAllByType('input').find((node) => node.props.type === 'checkbox')
+  await act(async () => stopOnHit.props.onChange({ target: { checked: true } }))
+  await form.submit()
+
+  assert.deepEqual(remote.execution(), {
+    mode: 'mock',
+    candidates: ['hunter2', 'letmein'],
+    stop_on_hit: true,
+  })
 })
 
 test('sidebar shows planner and scheduler modes separately', async (t) => {

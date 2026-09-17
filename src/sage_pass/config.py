@@ -39,6 +39,19 @@ def _parse_scheduler_type(raw: str) -> SchedulerType:
         ) from exc
 
 
+def _parse_batch_size(raw: str) -> int:
+    """决策批次大小：批越大，每批的进程启动开销摊得越薄。"""
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"SAGE_DECISION_BATCH_SIZE={raw!r} 不是整数"
+        ) from exc
+    if value <= 0 or value > 100_000:
+        raise RuntimeError("SAGE_DECISION_BATCH_SIZE 必须在 1～100000 之间")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     database_url: str
@@ -72,6 +85,9 @@ class Settings:
     pdf2john_path: str = "pdf2john"
     office2john_path: str = "office2john"
     extraction_timeout_seconds: float = 30.0
+    decision_batch_size: int = 1_000
+    wordlist_path: Path | None = None
+    stop_on_hit: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -154,4 +170,16 @@ class Settings:
             extraction_timeout_seconds=float(
                 os.getenv("SAGE_EXTRACTION_TIMEOUT_SECONDS", "30")
             ),
+            decision_batch_size=_parse_batch_size(
+                os.getenv("SAGE_DECISION_BATCH_SIZE", "1000")
+            ),
+            wordlist_path=(
+                _as_path(value)
+                if (value := os.getenv("SAGE_WORDLIST_PATH"))
+                else None
+            ),
+            stop_on_hit=os.getenv("SAGE_STOP_ON_HIT", "false")
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"},
         )

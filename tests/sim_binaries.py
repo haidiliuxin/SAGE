@@ -50,6 +50,7 @@ if log_path:
         lf.write(json.dumps({
             "argv": sys.argv[1:],
             "hash_type": arg_value("--hash-type"),
+            "attack_mode": arg_value("--attack-mode"),
             "targets": targets,
             "candidate_count": total,
         }, ensure_ascii=False) + "\n")

@@ -328,6 +328,8 @@ Mock（第一周链路，无需候选）：
 - `candidates`：可选的优先补充候选，最多 100000 条，每条为 1～1024 字符的单行文本；不提供时，后端根据策略计划自动生成 S1～S5 候选；
 - `hashcat_mode`：可选。缺省时 Hash 任务由 `known_algorithm` 自动映射（bcrypt=3200、sha256=1400、zip-aes=13600、zip-legacy=17225 等），ZIP 任务按 zip2john 的 `$zip2$` / `$pkzip2$` 结构自动判定（13600 / 17200 / 17210 / 17225 / 17230）；无法确定时返回 `422`；
 - `timeout`：可选，覆盖策略时间预算的每策略秒数上限。
+- `stop_on_hit`：可选（默认取 `SAGE_STOP_ON_HIT`）。为 `true` 时采用真实破解语义：任一策略恢复出目标后立即结束本次运行，研究停止原因为 `all_targets_recovered`，不再消耗剩余候选。
+- `candidates`：可选，最多 10 万条单行文本。作为高优先级候选进入 S1（前端支持粘贴或导入 `.txt` 词表）。更大的字典请放到服务器上并配置 `SAGE_WORDLIST_PATH`：此时 S1 改为 **hashcat 原生词表攻击**（`--attack-mode 0 <词表>`，单进程读完整本字典，不经过 Python 候选列表，也不写入临时候选文件）。
 
 返回：
 

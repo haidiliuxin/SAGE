@@ -100,10 +100,18 @@ export const api = {
     return request<StrategyPlan>(`/api/tasks/${taskId}/plan`, { method: 'POST' })
   },
 
-  execute(taskId: string, mode: ExecutionMode = 'mock') {
+  execute(
+    taskId: string,
+    mode: ExecutionMode = 'mock',
+    options: { candidates?: string[]; stop_on_hit?: boolean } = {},
+  ) {
     return request<RunCreated>(`/api/tasks/${taskId}/execute`, {
       method: 'POST',
-      body: JSON.stringify({ mode }),
+      body: JSON.stringify({
+        mode,
+        candidates: options.candidates ?? [],
+        stop_on_hit: options.stop_on_hit,
+      }),
     })
   },
 

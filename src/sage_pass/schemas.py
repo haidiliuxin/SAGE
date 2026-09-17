@@ -226,6 +226,8 @@ class ExecutionRequest(BaseModel):
     candidates: list[str] = Field(default_factory=list, max_length=100_000)
     hashcat_mode: int | None = Field(default=None, ge=0, le=99_999)
     timeout: int | None = Field(default=None, gt=0, le=86_400)
+    # 命中即停：真实破解语义（找到目标即结束），缺省时使用 SAGE_STOP_ON_HIT。
+    stop_on_hit: bool | None = None
 
     @model_validator(mode="after")
     def validate_candidates(self) -> "ExecutionRequest":

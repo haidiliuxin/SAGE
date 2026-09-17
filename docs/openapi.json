@@ -1122,6 +1122,17 @@
               }
             ],
             "title": "Timeout"
+          },
+          "stop_on_hit": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop On Hit"
           }
         },
         "type": "object",
