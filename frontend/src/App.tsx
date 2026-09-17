@@ -213,6 +213,18 @@ function App() {
   const [selectedFile, setSelectedFile] = useState<FileDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [taskActionError, setTaskActionError] = useState('')
+  const [copiedPlaintext, setCopiedPlaintext] = useState<string | null>(null)
+
+  const copyPlaintext = async (value: string) => {
+    try {
+      const clipboard = globalThis.navigator?.clipboard
+      if (!clipboard) throw new Error('clipboard unavailable')
+      await clipboard.writeText(value)
+      setCopiedPlaintext(value)
+    } catch {
+      setCopiedPlaintext(null)
+    }
+  }
   const [cancellingTaskId, setCancellingTaskId] = useState<string | null>(null)
   const [statusChangingTaskId, setStatusChangingTaskId] = useState<string | null>(null)
   const [pauseRequestedTaskId, setPauseRequestedTaskId] = useState<string | null>(null)
@@ -732,6 +744,8 @@ function App() {
                     </div>
                     {snapshot.plan && <div className="plan-summary"><span>已分配时间 <strong>{snapshot.plan.strategies.reduce((sum, item) => sum + item.time_budget, 0)} / {snapshot.plan.total_time_budget}s</strong></span><span>已分配候选 <strong>{formatNumber(snapshot.plan.strategies.reduce((sum, item) => sum + item.candidate_budget, 0))} / {formatNumber(snapshot.prir?.candidate_budget)}</strong></span></div>}
                     {snapshot.plan?.warnings.length ? <div className="notice-list"><strong>规划提示</strong>{snapshot.plan.warnings.map((warning, index) => <p key={`${warning}-${index}`}>{warning}</p>)}</div> : null}
+                    {snapshot.plan && !snapshot.plan.strategies.some((item) => item.strategy_id === 'S4') ? <p className="panel-note">本次未提供个人信息或历史旧口令（信息场景 {snapshot.prir?.information_profile?.scenario ?? 'I0'}），S4 个性化策略未纳入计划。</p> : null}
+                    {snapshot.plan && !snapshot.plan.strategies.some((item) => item.strategy_id === 'S5') ? <p className="panel-note">尚无跨任务结构知识（Pattern Knowledge），S5 迁移策略未纳入计划。</p> : null}
                   </article>
 
                   <article className="panel prir-panel">
@@ -741,6 +755,22 @@ function App() {
                 </div>
 
                 {snapshot.result && <article className="result-strip"><div><span className="result-check"><Icon name="check" /></span><div><span className="section-kicker">ASSESSMENT COMPLETE</span><h2>评测链路已完整跑通</h2><p>共测试 {formatNumber(snapshot.result.total_tested)} 个候选，恢复 {snapshot.result.total_recovered} 项。各策略统计见上方列表。</p></div></div><button className="button secondary" onClick={resetFlow}>新建评测 <Icon name="arrow" size={15} /></button></article>}
+
+                {snapshot.result && (snapshot.result.recovered_items ?? []).length > 0 && (
+                  <article className="panel recovered-panel">
+                    <div className="panel-head"><div><span className="section-kicker">RECOVERED</span><h2>恢复结果</h2></div><span className="panel-tag">{(snapshot.result.recovered_items ?? []).length} 项</span></div>
+                    <ul className="recovered-list">
+                      {(snapshot.result.recovered_items ?? []).map((item, index) => (
+                        <li key={`${item.target}-${index}`}>
+                          <code className="recovered-plaintext">{item.plaintext}</code>
+                          <button type="button" className="button secondary" onClick={() => void copyPlaintext(item.plaintext)}>{copiedPlaintext === item.plaintext ? '已复制' : '复制'}</button>
+                          <small className="recovered-target">来源目标 {item.target.length > 28 ? `${item.target.slice(0, 28)}…` : item.target}</small>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="panel-note">明文仅在本地界面展示，用于本次授权的离线评测复核，不写入跨任务知识库。</p>
+                  </article>
+                )}
               </>
             )}
           </section>

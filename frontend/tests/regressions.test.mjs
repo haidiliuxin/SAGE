@@ -110,6 +110,8 @@ function remoteFlow(strategyIds = ['S1'], overrides = {}) {
       task_id: taskId, run_id: runId, status: 'completed', total_time: 2,
       total_tested: 123, total_recovered: 2, finished_at: new Date().toISOString(),
       strategy_results: strategies.map(({ strategy_id }) => ({ strategy_id, time: 1, tested: 100, recovered: 1, success_rate: 0.01 })),
+      recovered_items: [],
+      ...overrides.result,
     }
     else if (url.endsWith('/research')) data = { run_id: runId, task_id: taskId, status: 'completed', available: false }
     else if (url.includes('/research/events?')) data = { items: [], next_after_sequence: 0, next_before_sequence: null, has_more: false }
@@ -179,6 +181,41 @@ for (const ids of [['S1'], ['S1', 'S4']]) {
     assert.doesNotMatch(summaryText, /Context|最高|收益/)
   })
 }
+
+test('result view shows recovered plaintext instead of only a count', async (t) => {
+  const remote = remoteFlow(['S1'], {
+    result: {
+      total_recovered: 1,
+      recovered_items: [{ target: '$zip2$*0*3*0*76e99cf0732df1cf*508b*4a*d1aaf2$', plaintext: '网络安全2024' }],
+    },
+  })
+  const form = await openForm(t, remote.handler)
+  await form.submit()
+
+  const pageText = text(form.renderer.root)
+  assert.match(pageText, /恢复结果/)
+  assert.match(pageText, /网络安全2024/)
+  assert.match(pageText, /来源目标/)
+  const copy = form.renderer.root.findAllByType('button').find((node) => text(node).trim() === '复制')
+  assert.ok(copy, '恢复结果应提供复制按钮')
+})
+
+test('plan panel explains when S4 and S5 are absent from the plan', async (t) => {
+  const form = await openForm(t, remoteFlow(['S1', 'S2', 'S3']).handler)
+  await form.submit()
+
+  const pageText = text(form.renderer.root)
+  assert.match(pageText, /S4 个性化策略未纳入计划/)
+  assert.match(pageText, /S5 迁移策略未纳入计划/)
+})
+
+test('plan panel stays silent about S4 when the plan includes it', async (t) => {
+  const form = await openForm(t, remoteFlow(['S1', 'S2', 'S3', 'S4']).handler)
+  await form.submit()
+
+  const pageText = text(form.renderer.root)
+  assert.doesNotMatch(pageText, /S4 个性化策略未纳入计划/)
+})
 
 test('invalid year is reported without sending a task to the backend', async (t) => {
   const remote = remoteFlow()
