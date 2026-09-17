@@ -17,6 +17,8 @@ SAGE-Pass 是面向异构离线口令安全评测任务的智能策略编排系�
 - Mock Executor：启动模拟执行、查询执行状态、返回最终模拟结果；
 - Hashcat Adapter：真实执行的启动、停止（取消）、时间预算自动停止与恢复结果解析（含 `$HEX[]`）；
 - ZIP Adapter：zip2john 提取 WinZip AES（`$zip2$`，hashcat 13600），传统 PKZIP 明确报不支持；
+- PDF/Office Adapter（A 冲刺第 2 周）：pdf2john / office2john 提取加密目标，模式覆盖 10400/10500/10600/10700/10510 与 9700/9800/9400/9500/9600；
+- 数据库迁移：`migrations.py` 版本化幂等迁移（`schema_migrations`），建表后自动应用；
 - Real Executor：`mode: real` 按 Bandit 选择候选批次运行 Hashcat，写回 `StrategyRunModel` 并把任务推进到终态，运行中可暂停、继续或取消；
 - S1 Baseline：后端生成有序基础候选，并支持请求方提供可选的高优先级补充候选；
 - S2 Rule：根据计划参数执行首字母大写、全大写/小写、数字/年份/符号后缀及常见字符替换；
@@ -39,10 +41,39 @@ SAGE-Pass 是面向异构离线口令安全评测任务的智能策略编排系�
 - 历史评分：S5 的 Pattern Knowledge 频次、任务覆盖、置信度和时效衰减形成 0～1 `transfer_score`，注入现有 `ArmSpec`；Bandit 公式和首轮探索规则保持不变；
 - 只读知识 API：`GET /api/feedback/patterns` 支持按目标类型、算法、模式类型和最低置信度过滤，响应不包含恢复明文、Hash 或文件内容；
 - 自适应预算与停止：Hashcat 每批返回的测试数、恢复数和耗时会更新调度评分；任务总预算、策略预算、时间预算或候选耗尽后停止继续分配；
+- 调度策略与实验（B 侧）：`fixed` / `round_robin` / `heuristic_bandit` / `ucb` / `cost_aware_ucb` 可选，提供成本标定、离线回放、研究日志与研究 API（`/api/runs/{run_id}/research*`）及前端研究面板；
 - LLM Planner：只向模型发送结构化 PRIR，使用严格 JSON Schema 输出，支持温度、超时、最大输出 token、进程内 TTL/LRU 缓存及异常降级；
 - Policy Validator：在计划进入执行链路前校验策略白名单、目标适用性、双预算、优先级和参数范围；
 - Rule Planner：无上下文按 S1→S2→S3，有上下文追加 S4；慢 Hash 将上下文高概率策略提前并限制候选池规模；
 - pytest 覆盖任务、文件、状态机、候选生成、适配器、Mock/Real 执行、Bandit 评分、预算停止和策略统计链路。
+
+## B 决策模型与离线回放
+
+第一至第三步交付说明见 [B 阶段交接](docs/handoff/b-milestone1-3.md)，包含
+[接口对齐方案](docs/decision/interface-alignment.md)和
+[数学模型](docs/decision/mathematical-model.md)。离线回放复用 fixed、round_robin、
+heuristic_bandit，支持候选去重、双预算、目标级收益、完整轨迹和批次边界恢复。
+第四步已接入真实执行与回放的统一奖励、SQLite 完整日志及 JSONL 导出，
+详见 [第四步交接](docs/handoff/b-milestone4.md)和
+[奖励与日志说明](docs/decision/reward-and-logging.md)。本次改动待使用方运行测试。
+
+第五步新增 UCB、在线成本拟合与 Cost-aware UCB，已接入真实执行与回放；
+CLI 的 `--policy all` 现在比较五种算法。公式与借鉴来源见
+[UCB 与成本模型](docs/decision/ucb-and-cost.md)，验收命令见
+[第五步交接](docs/handoff/b-milestone5.md)。第四步用户报告 79 项通过，第五步用户已确认测试和示例运行通过。
+
+成本标定器与四种盐条件模型现已补齐，提供真实测量、标定拟合、回放导入及近期吞吐。
+使用方式见 [成本与盐条件说明](docs/decision/calibration-and-salts.md)，
+交接与验收状态见 [补齐项交接](docs/handoff/b-calibration-salts.md)。本次新增内容待用户测试。
+
+B 研究数据现已接入执行工作台与历史运行详情，提供只读摘要、分页事件和完整脱敏日志下载。
+范围、字段约定、刷新／重启读取方式与验收命令见 [B 部分前端添加文档](docs/handoff/b-frontend-additions.md)。本次接入尚未运行测试或前端构建。
+
+在已安装项目的环境中比较三个基线：
+
+```powershell
+python -m sage_pass.experiments --scenario examples/replay/baseline-small.json --output data/replay/baseline-comparison.json
+```
 
 ## 本地启动
 

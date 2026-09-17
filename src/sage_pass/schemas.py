@@ -10,6 +10,7 @@ from .enums import (
     InformationScenario,
     InformationType,
     PlannerType,
+    SchedulerType,
     StrategyId,
     TargetType,
     TaskStatus,
@@ -298,6 +299,15 @@ class PatternKnowledgeResponse(BaseModel):
     task_count: int = Field(ge=0)
     confidence: float = Field(ge=0.0, le=1.0)
     last_seen_at: datetime
+
+
+class SystemConfigResponse(BaseModel):
+    """运行配置（前端展示规划模式与调度模式，二者语义分离）。"""
+
+    planner_type: PlannerType
+    scheduler_type: SchedulerType
+    real_execution_configured: bool
+    feedback_mock_enabled: bool
 
 
 class ErrorDetail(BaseModel):

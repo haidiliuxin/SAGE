@@ -94,6 +94,15 @@ class CandidateBatch:
     snapshot: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
+        if not self.records and self.candidates:
+            object.__setattr__(
+                self,
+                "records",
+                tuple(
+                    CandidateRecord(value, self.strategy_id, ())
+                    for value in self.candidates
+                ),
+            )
         if len(self.records) != len(self.candidates):
             raise ValueError("records 与 candidates 数量必须一致")
         if tuple(item.value for item in self.records) != self.candidates:

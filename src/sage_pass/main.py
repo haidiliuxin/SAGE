@@ -15,6 +15,7 @@ from .real_executor import RealExecutor
 from .routes import router
 from .run_control import RunControl
 from .service import finalize_interrupted_tasks
+from .targets import OfficeTargetExtractor, PdfTargetExtractor
 from .zip_adapter import ZipHashExtractor
 
 
@@ -35,10 +36,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         application.state.zip_extractor = ZipHashExtractor(
             resolved.zip2john_path
         )
+        application.state.pdf_extractor = PdfTargetExtractor(
+            resolved.pdf2john_path,
+            timeout=resolved.extraction_timeout_seconds,
+        )
+        application.state.office_extractor = OfficeTargetExtractor(
+            resolved.office2john_path,
+            timeout=resolved.extraction_timeout_seconds,
+        )
         application.state.real_executor = RealExecutor(
             session_factory=database.session_factory,
             settings=resolved,
             zip_extractor=application.state.zip_extractor,
+            pdf_extractor=application.state.pdf_extractor,
+            office_extractor=application.state.office_extractor,
             control=control,
         )
         # 异常恢复：真实运行按持久化检查点自动续跑；其余残留任务收尾避免悬挂。
@@ -53,7 +64,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     application = FastAPI(
         title="SAGE-Pass API",
-        version="0.3.0",
+        version="0.5.0",
         description=(
             "面向异构离线口令安全评测任务的编排 API。支持 mock 与基于 "
             "Hashcat 的真实执行（第二周），并接入 WinZip AES（$zip2$）"

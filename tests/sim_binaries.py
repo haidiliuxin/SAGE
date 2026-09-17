@@ -44,6 +44,16 @@ total = len(candidates)
 if slow:
     time.sleep(slow)
 
+log_path = os.environ.get("FAKE_HASHCAT_LOG", "")
+if log_path:
+    with open(log_path, "a", encoding="utf-8") as lf:
+        lf.write(json.dumps({
+            "argv": sys.argv[1:],
+            "hash_type": arg_value("--hash-type"),
+            "targets": targets,
+            "candidate_count": total,
+        }, ensure_ascii=False) + "\n")
+
 print(json.dumps({"progress": [total, 0], "percent": 100}))
 sys.stdout.flush()
 
@@ -84,6 +94,51 @@ if kind == "garbage":
     sys.exit(1)
 sys.exit(1)
 '''
+
+
+FAKE_JOHN_EXTRACTOR = r'''# -*- coding: utf-8 -*-
+"""仿真 pdf2john / office2john：按 FAKE_JOHN_KIND 输出样例 Hash 行。"""
+
+import os
+import sys
+import time
+
+kind = os.environ.get("FAKE_JOHN_KIND", "pdf2")
+slow = float(os.environ.get("FAKE_JOHN_SLOW", "0"))
+target = sys.argv[-1] if sys.argv else ""
+
+if slow:
+    time.sleep(slow)
+
+SAMPLES = {
+    "pdf1": "$pdf$1*2*40*-1*1*16*abcdef0123456789*32*0011223344556677",
+    "pdf2": "$pdf$2*3*128*-1028*1*16*abcdef0123456789*32*0011223344556677*32*8899aabbccddeeff",
+    "pdf3": "$pdf$3*3*128*1*16*abcdef0123456789*32*0011223344556677",
+    "pdf4": "$pdf$4*4*128*-1028*1*16*abcdef0123456789*32*0011223344556677*32*8899aabbccddeeff",
+    "office2007": "$office$*2007*20*128*16*abcdef0123456789*0011223344556677*8899aabbccddeeff",
+    "office2010": "$office$*2010*100000*128*16*abcdef0123456789*0011223344556677*8899aabbccddeeff",
+    "office2013": "$office$*2013*100000*256*16*abcdef0123456789*0011223344556677*8899aabbccddeeff",
+    "oldoffice1": "$oldoffice$1*abcdef0123456789*0011223344556677*8899aabbccddeeff",
+    "empty": "",
+}
+
+sample = SAMPLES.get(kind, "")
+if sample:
+    print(f"{target}:{sample}")
+    sys.exit(0)
+sys.stderr.write("no hash found (file may be unencrypted)\n")
+sys.exit(1)
+'''
+
+
+def write_john_extractor_scripts(directory: Path) -> tuple[Path, Path]:
+    """写入 pdf2john / office2john 仿真脚本，返回 (pdf_path, office_path)。"""
+    directory.mkdir(parents=True, exist_ok=True)
+    pdf_script = directory / "fake_pdf2john.py"
+    office_script = directory / "fake_office2john.py"
+    pdf_script.write_text(FAKE_JOHN_EXTRACTOR, encoding="utf-8")
+    office_script.write_text(FAKE_JOHN_EXTRACTOR, encoding="utf-8")
+    return pdf_script, office_script
 
 
 def write_sim_scripts(directory: Path) -> tuple[Path, Path]:
