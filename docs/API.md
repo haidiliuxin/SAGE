@@ -1,9 +1,9 @@
-# SAGE-Pass 统一接口（A 两周冲刺 · 第 2 周）
+# SAGE-Pass 统一接口（A / B / C 两周冲刺合并契约）
 
-版本：`0.5.0`
+版本：`0.6.0`
 基础地址：`http://127.0.0.1:8000`
 
-本文把团队提供的《统一接口.docx》落实为当前后端契约，并记录真实执行、执行控制、Bandit 自适应调度、Feedback/S5，以及 A 冲刺第 1 周的算法识别链、Argon2、调度模式与跨重启结果查询。字段定义的机器可读版本见同目录 `openapi.json`；运行服务后也可在 `/docs` 联调。
+本文把团队提供的《统一接口.docx》落实为当前后端契约，并记录 A 冲刺的算法识别链、Argon2、PDF/Office 目标提取、调度模式与跨重启结果查询，B 侧的决策模型与离线回放，以及 C 侧的信息场景（`I0`～`I3`）、`InformationProfile` 与生成器注册表。字段定义的机器可读版本见同目录 `openapi.json`；运行服务后也可在 `/docs` 联调。
 
 ## 统一约定
 
@@ -15,7 +15,8 @@
 - 策略编号：`S1`、`S2`、`S3`、`S4`、`S5`。
 - 执行模式：`mock`（第一周链路，保留）与 `real`（真实执行）。
 - 规划模式：`mock`、`rule`、`llm`（`adaptive` 已弃用，见下）。
-- 调度模式：`fixed`、`round_robin`、`heuristic_bandit`（`ucb`、`cost_aware_ucb`、`thompson` 由 B 侧交付）。
+- 调度模式：`fixed`、`round_robin`、`heuristic_bandit`、`ucb`、`cost_aware_ucb` 已可用（`thompson` 为预留值，配置后明确报错，不静默回退）。
+- 信息场景：`I0`（无辅助信息）、`I1`（仅个人信息）、`I2`（仅历史旧口令）、`I3`（个人信息 + 历史旧口令），由后端统一推导。
 - 无法确定的字段使用 `null` 或 `unknown`，不得编造。
 
 ## A 冲刺第 1 周要点
@@ -58,7 +59,9 @@ ExecutionRequest.hashcat_mode
 
 - 统一接口：`supports(target_type)` + `extract(target_type, content, file_path) -> ExtractedTarget`；
 - 已实现：`HashTargetExtractor`（行内 Hash）、`ZipTargetExtractor`（zip2john → `$zip2$`，模式 13600）；
-- `PdfTargetExtractor` / `OfficeTargetExtractor`：本阶段返回明确 `422`（下一阶段交付，不静默降级）。
+- `PdfTargetExtractor`：pdf2john 提取，按 `$pdf$` 版本映射 10400 / 10500 / 10600 / 10700 / 10510，未知版本或非加密 PDF 返回明确 `422`；
+- `OfficeTargetExtractor`：office2john 提取，按哈希签名映射 `$oldoffice$0/1` → 9700、`$oldoffice$3/4` → 9800、`$office$*2007*` → 9400、`*2010*` → 9500、`*2013*` → 9600，未识别签名返回明确 `422`；
+- 三者共用 `SAGE_EXTRACTION_TIMEOUT_SECONDS` 超时；工具缺失时返回提示信息而非静默降级。
 
 ### 已完成真实运行的跨重启查询
 
@@ -462,21 +465,57 @@ Pattern Knowledge 的作用域为 `target_type + algorithm`，只保存长度、
 
 该接口不会返回恢复明文、目标 Hash、文件内容或历史任务上下文。最终运行结果接口仍按既有契约向当前授权客户端返回该 run 的 `recovered_items`；这与跨任务 Pattern Knowledge 的脱敏存储是两个独立边界。
 
-## 环境变量（真实执行）
+## 环境变量（执行与生成器）
 
 | 变量 | 说明 | 默认 |
 | --- | --- | --- |
 | `SAGE_HASHCAT_PATH` | hashcat 可执行文件路径或命令名 | `hashcat` |
 | `SAGE_ZIP2JOHN_PATH` | zip2john 可执行文件路径或命令名 | `zip2john` |
-| `SAGE_S3_GENERATOR` | S3 具体生成器：`pcfg_lite` / `pcfg_full` / `markov` | `pcfg_lite` |
-| `SAGE_S4_GENERATOR` | S4 具体生成器：`auto` / `context` / `history` / `hybrid` | `auto` |
+| `SAGE_PDF2JOHN_PATH` | pdf2john 可执行文件路径或命令名 | `pdf2john` |
+| `SAGE_OFFICE2JOHN_PATH` | office2john 可执行文件路径或命令名 | `office2john` |
+| `SAGE_EXTRACTION_TIMEOUT_SECONDS` | 目标提取（`*2john`）超时秒数 | `30` |
+| `SAGE_SCHEDULER_TYPE` | 调度模式：`fixed` / `round_robin` / `heuristic_bandit` / `ucb` / `cost_aware_ucb` | `heuristic_bandit` |
+| `SAGE_PLANNER_TYPE` | 规划模式：`mock` / `rule` / `llm` | `mock` |
+| `SAGE_PCFG_VARIANT` | S3 默认生成器：`pcfg_lite` / `pcfg_full` | `pcfg_lite` |
+| `SAGE_PCFG_RULESET_PATH` | `pcfg_full` 使用的 pcfg_cracker ruleset 目录 | 未设置 |
+| `SAGE_MARKOV_ORDER` | Markov（OMEN 风格）模型阶数，取值 2～5 | `3` |
+| `SAGE_MARKOV_RULESET_PATH` | Markov 独立模型/ruleset 路径 | 未设置 |
+| `SAGE_S3_GENERATOR` | 覆盖 S3 生成器：`pcfg_lite` / `pcfg_full` / `markov` | 跟随 `SAGE_PCFG_VARIANT` |
+| `SAGE_S4_GENERATOR` | 覆盖 S4 生成器：`auto` / `context` / `history` / `hybrid` | `auto` |
 | `SAGE_FEEDBACK_MINIMUM_OBSERVATIONS` | S5 可用模式的最低观察数 | `2` |
 | `SAGE_FEEDBACK_MINIMUM_TASKS` | S5 可用模式的最低独立任务数 | `2` |
 | `SAGE_FEEDBACK_MAXIMUM_PATTERNS_PER_SCOPE` | 每个作用域最多保存的模式数 | `500` |
 | `SAGE_FEEDBACK_RECENCY_HALF_LIFE_DAYS` | transfer score 时效半衰期（天） | `90` |
 | `SAGE_FEEDBACK_ENABLE_MOCK` | 仅供测试显式允许 Mock finalize 进入反馈处理 | `false` |
 
-未安装 hashcat 时，`mode: "real"` 的 Hash 任务在启动时返回 `503 EXECUTION_FAILED`（错误信息提示检查 `SAGE_HASHCAT_PATH`）；未安装 zip2john 时，ZIP 分析会降级并给出提示，ZIP 真实执行同样返回 `503`。
+未安装 hashcat 时，`mode: "real"` 的 Hash 任务在启动时返回 `503 EXECUTION_FAILED`（错误信息提示检查 `SAGE_HASHCAT_PATH`）；未安装 zip2john 时，ZIP 分析会降级并给出提示，ZIP 真实执行同样返回 `503`。PDF/Office 真实执行依赖各自的 `*2john` 工具，缺失时返回 `503` 并在 `details` 中指明变量名。
+
+## C 侧：信息场景与生成器注册表
+
+### InformationProfile 契约
+
+任务分析后，`TaskDetail.information_profile` 与 `PRIR.information_profile` 返回统一画像，字段包括：场景（`I0`～`I3`）、是否存在个人信息、信息类型集合、是否存在历史旧口令、历史旧口令数量、是否存在 Pattern Knowledge，以及不含原文的结构摘要（个人字段/值数量、历史口令长度区间分布、字符类别组合分布）。
+
+- 画像只含计数与分布，不含个人信息原文，也不含历史旧口令原文、规范化形式或哈希；
+- 任务详情不序列化 `historical_passwords`，仅返回数量与抽象结构；
+- LLM Planner 只接收该脱敏画像，不接收个人信息或历史旧口令原文。
+
+### 生成器注册表
+
+`src/sage_pass/generators/` 提供统一 `GeneratorProtocol`（`prepare` / `next_batch` / `exhausted` / `snapshot` / `restore`），`CandidateGenerator` 只负责策略映射、Registry 调用、全局去重、合法性与预算过滤、分批：
+
+| 策略 | 默认生成器 | 可覆盖 |
+| --- | --- | --- |
+| `S1` | `baseline` | — |
+| `S2` | `rule` | — |
+| `S3` | `pcfg_lite` | `SAGE_S3_GENERATOR` / `SAGE_PCFG_VARIANT` |
+| `S4` | 按场景 `auto`：`I1` → `context`、`I2` → `history`、`I3` → `hybrid` | `SAGE_S4_GENERATOR` |
+| `S5` | `pattern_knowledge`（旧名 `transfer` 保留兼容） | — |
+
+- `CandidateBatch` 位于 `candidate_types.py`，带 `generator_id`、`exhausted` 与状态快照；旧的 `candidate_generator.CandidateBatch` 导入路径继续可用；
+- RunRecord 快照为 schema v2，记录每个策略的 `generator_id`；无版本或 v1 快照按旧批次数组与 `consumed` 游标恢复，未知版本明确失败；
+- 历史旧口令候选来源使用 `kind="historical_password"`，对外展示一律经 `CandidateSource.public_dict()` 无条件清除 `original` 与 `normalized`；
+- `passllm` 仅保留 ID 文档，未注册空实现。
 
 ## 统一错误响应
 
