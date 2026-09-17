@@ -44,6 +44,42 @@ def _bounded_int(minimum: int, maximum: int) -> ParameterRule:
     )
 
 
+def _mask_list_rule(max_items: int = 64) -> ParameterRule:
+    """掩码列表：1～max_items 个非空单行掩码（如 ?d?d?d?d）。"""
+    return ParameterRule(
+        accepts=lambda value, _: (
+            isinstance(value, list)
+            and 1 <= len(value) <= max_items
+            and all(
+                isinstance(item, str)
+                and 0 < len(item) <= 64
+                and "\n" not in item
+                and "\r" not in item
+                for item in value
+            )
+        ),
+        description=f"1～{max_items} 个非空掩码字符串",
+    )
+
+
+def _string_list_rule(*, max_items: int, max_length: int) -> ParameterRule:
+    """字符串列表：用于规则文件等路径参数。"""
+    return ParameterRule(
+        accepts=lambda value, _: (
+            isinstance(value, list)
+            and 1 <= len(value) <= max_items
+            and all(
+                isinstance(item, str)
+                and 0 < len(item) <= max_length
+                and "\n" not in item
+                and "\r" not in item
+                for item in value
+            )
+        ),
+        description=f"1～{max_items} 个非空字符串",
+    )
+
+
 def _bounded_number(minimum: float, maximum: float) -> ParameterRule:
     return ParameterRule(
         accepts=lambda value, _: (
@@ -60,6 +96,7 @@ BOOL_RULE = ParameterRule(_is_bool, "布尔值")
 STRATEGY_PARAMETER_RULES: dict[StrategyId, dict[str, ParameterRule]] = {
     StrategyId.S1: {},
     StrategyId.S2: {
+        "hashcat_rule_files": _string_list_rule(max_items=8, max_length=512),
         "capitalize_first": BOOL_RULE,
         "all_upper": BOOL_RULE,
         "all_lower": BOOL_RULE,
@@ -89,6 +126,14 @@ STRATEGY_PARAMETER_RULES: dict[StrategyId, dict[str, ParameterRule]] = {
         ),
     },
     StrategyId.S5: {},
+    StrategyId.S6: {
+        "hashcat_attack_mode": _bounded_int(3, 3),
+        "hashcat_masks": _mask_list_rule(),
+    },
+    StrategyId.S7: {
+        "hashcat_attack_mode": _bounded_int(6, 6),
+        "hashcat_hybrid_mask": _mask_list_rule(),
+    },
 }
 
 PASSWORD_TARGETS = frozenset({
@@ -104,6 +149,9 @@ STRATEGY_TARGETS: dict[StrategyId, frozenset[TargetType]] = {
     StrategyId.S3: PASSWORD_TARGETS,
     StrategyId.S4: PASSWORD_TARGETS,
     StrategyId.S5: PASSWORD_TARGETS,
+    # 掩码/暴力与混合攻击是 hashcat 的攻击模式，适用于全部口令类目标。
+    StrategyId.S6: PASSWORD_TARGETS,
+    StrategyId.S7: PASSWORD_TARGETS,
 }
 
 

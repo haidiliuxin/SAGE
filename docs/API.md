@@ -12,7 +12,21 @@
 - 任务状态：`created`、`analyzed`、`planned`、`running`、`paused`、`completed`、`failed`、`cancelled`。
 - 目标类型：`hash`、`zip`、`pdf`、`office`、`unknown`（ZIP/PDF/Office 均已接入真实提取）。
 - 验证成本：`low`、`medium`、`high`、`unknown`。
-- 策略编号：`S1`、`S2`、`S3`、`S4`、`S5`。
+- 策略编号：`S1`、`S2`、`S3`、`S4`、`S5`，以及原生攻击单元 `S6`（掩码/暴力）与 `S7`（混合攻击）。
+
+### 原生攻击单元（S6 / S7）
+
+配置后由规划层自动纳入计划（需要 `SAGE_PLANNER_TYPE=rule`）：
+
+| 变量 | 作用 | 计划表现 |
+| --- | --- | --- |
+| `SAGE_RULES_PATH` | hashcat 规则文件 | S2 参数带 `hashcat_rule_files`，执行时以 `-r` 运行词表种子 |
+| `SAGE_MASK_LADDER` | 掩码阶梯（逗号分隔） | 新增 S6，参数 `hashcat_attack_mode=3` + `hashcat_masks`，掩码直接作为 hashcat 参数 |
+| `SAGE_HYBRID_MASKS` | 混合攻击掩码 | 新增 S7，参数 `hashcat_attack_mode=6` + `hashcat_hybrid_mask`，与词表组合（需要词表） |
+
+- 掩码/混合攻击的候选空间由 **hashcat 自己枚举**，后端不展开，因此不受 10 万候选上限约束；
+- 每个原生攻击单元每轮运行至多执行一次，时间上限由调度器给出的 `time_limit`（`--runtime`）约束；
+- 未配置词表时，S7 会自行让出（记录"该原生攻击需要词表，本次未配置词表"），不影响其它单元。
 - 执行模式：`mock`（第一周链路，保留）与 `real`（真实执行）。
 - 规划模式：`mock`、`rule`、`llm`（`adaptive` 已弃用，见下）。
 - 调度模式：`fixed`、`round_robin`、`heuristic_bandit`、`ucb`、`cost_aware_ucb` 已可用（`thompson` 为预留值，配置后明确报错，不静默回退）。

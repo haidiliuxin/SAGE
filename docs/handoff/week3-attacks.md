@@ -34,13 +34,26 @@
 
 全量后端 `pytest` 通过；前端 27 项通过；`docs/openapi.json` 与运行时一致。
 
-## 仍缺的一步（下一步工作）
+## 计划层激活（已完成）
 
-**规划层还没有默认产出这些参数**：`RulePlanner._rule_parameters` 未改动，`config.py` 也没有
-规则文件/掩码阶梯的配置项，因此默认运行时不会自动发起掩码/混合攻击——需要调用方（或 LLM 规划器）
-显式给出 S2 的 `hashcat_*` 参数才会触发。补齐方式与第 2 步计划一致：
+原先缺口是"规划层不会产出这些参数"，现已补齐：
 
-- `SAGE_RULES_PATH`（规则文件）→ S2 以 `-r` 运行词表种子；
-- `SAGE_MASK_LADDER`（掩码阶梯，如 `?d?d?d?d,?l?l?l?l,?l?l?l?l?d?d`）→ 每个掩码一次原生批次，按时间预算调度；
-- `SAGE_HYBRID_MASKS`（如 `?d?d,?d?d?d?d`）→ 词表 + 掩码混合攻击；
-- 计划层将相应单元纳入 S6（掩码/暴力）与 S7（混合）。
+- `config.py`：`SAGE_RULES_PATH`（规则文件）、`SAGE_MASK_LADDER`（掩码阶梯）、
+  `SAGE_HYBRID_MASKS`（混合掩码）；
+- `planner.py`：`NativeAttackSettings` + `RulePlanner(native_attacks=...)`，
+  配置后自动纳入 **S6（掩码/暴力）** 与 **S7（混合攻击）**，并给 S2 注入 `hashcat_rule_files`；
+- `policy.py`：白名单、参数规则（掩码列表、规则文件列表）与目标适用性放开 S6/S7；
+- `enums.py` + `generators/native.py`：S6/S7 策略编号与原生占位生成器（不产出候选，
+  仅用于调度记账）；
+- `real_executor.py`：参数驱动的原生单元按"一次性原生作业"调度；混合攻击使用
+  `SAGE_WORDLIST_PATH`/任务上传的词表作为 hashcat 位置参数；未配置词表时让出该单元。
+
+真实 hashcat 验证（掩码阶梯 `?d?d?d?d,?l?l?l?l`、混合掩码 `?d?d`、词表 14 条，目标 MD5("1234")）：
+
+```
+计划单元: S1, S5, S2, S3, S6, S7
+S6 参数: {"hashcat_attack_mode": 3, "hashcat_masks": ["?d?d?d?d", "?l?l?l?l"]}
+S6 执行: tested=2  recovered=1        ← -a 3 掩码命中 1234
+S7 执行: tested=1400 recovered=0      ← -a 6 词表+掩码
+合计: 3778 个候选、22 秒、8 轮调度、命中 1 项
+```

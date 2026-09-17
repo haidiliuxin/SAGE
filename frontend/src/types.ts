@@ -18,7 +18,7 @@ export type SchedulerType =
   | 'cost_aware_ucb'
   | 'thompson'
 export type ExecutionMode = 'mock' | 'real'
-export type StrategyId = 'S1' | 'S2' | 'S3' | 'S4' | 'S5'
+export type StrategyId = 'S1' | 'S2' | 'S3' | 'S4' | 'S5' | 'S6' | 'S7'
 export type InformationScenario = 'I0' | 'I1' | 'I2' | 'I3'
 export type InformationType =
   | 'name' | 'nickname' | 'username' | 'email_local_part' | 'phone_suffix'

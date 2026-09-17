@@ -31,6 +31,7 @@ from .registry import (
     UnknownGeneratorError,
 )
 from .rule import RuleGenerator
+from .native import NativeOnlyGenerator
 from .transfer import PatternKnowledgeGenerator, TransferGenerator
 
 
@@ -40,6 +41,9 @@ STRATEGY_GENERATOR_IDS: dict[StrategyId, str] = {
     StrategyId.S3: "pcfg_lite",
     StrategyId.S4: "context",
     StrategyId.S5: "pattern_knowledge",
+    # 原生攻击单元：候选由 hashcat 枚举，占位生成器不产出候选。
+    StrategyId.S6: "mask",
+    StrategyId.S7: "hybrid_mask",
 }
 
 # Reserved names are documentation only. They are deliberately not registered.
@@ -68,6 +72,9 @@ def build_default_registry(
     registry.register(PatternKnowledgeGenerator(transfer_generator))
     # Legacy registry ID retained for injected callers and old diagnostics.
     registry.register(TransferGenerator(transfer_generator))
+    # 原生攻击单元（掩码/混合）：候选由 hashcat 自己枚举，后端不展开明文空间。
+    registry.register(NativeOnlyGenerator("mask", StrategyId.S6))
+    registry.register(NativeOnlyGenerator("hybrid_mask", StrategyId.S7))
     return registry
 
 

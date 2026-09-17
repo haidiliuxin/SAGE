@@ -39,6 +39,15 @@ def _parse_scheduler_type(raw: str) -> SchedulerType:
         ) from exc
 
 
+def _parse_mask_list(raw: str, variable: str) -> tuple[str, ...]:
+    """逗号分隔的掩码列表（如 ?d?d?d?d,?l?l?l?l）。"""
+    items = tuple(item.strip() for item in raw.split(",") if item.strip())
+    for index, item in enumerate(items):
+        if "\n" in item or "\r" in item:
+            raise ValueError(f"{variable}[{index}] 必须为单行掩码")
+    return items
+
+
 def _parse_batch_size(raw: str, variable: str = "SAGE_DECISION_BATCH_SIZE") -> int:
     """批次大小：批越大，每批的 hashcat 进程启动开销摊得越薄。"""
     try:
@@ -89,6 +98,10 @@ class Settings:
     # 流式调度每次决策的候选上限：默认与调度粒度一致，保证 Bandit 能在单元内部
     # 重新分配预算；吞吐优先时可调大（如 100000）以摊薄 hashcat 进程启动开销。
     hashcat_stream_batch_size: int = 1_000
+    # 原生攻击配置：规则文件（-r）、掩码阶梯（-a 3）、混合掩码（-a 6）。
+    rules_path: Path | None = None
+    mask_ladder: tuple[str, ...] = ()
+    hybrid_masks: tuple[str, ...] = ()
     wordlist_path: Path | None = None
     stop_on_hit: bool = False
 
@@ -191,6 +204,17 @@ class Settings:
                 _as_path(value)
                 if (value := os.getenv("SAGE_WORDLIST_PATH"))
                 else None
+            ),
+            rules_path=(
+                _as_path(value)
+                if (value := os.getenv("SAGE_RULES_PATH"))
+                else None
+            ),
+            mask_ladder=_parse_mask_list(
+                os.getenv("SAGE_MASK_LADDER", ""), "SAGE_MASK_LADDER"
+            ),
+            hybrid_masks=_parse_mask_list(
+                os.getenv("SAGE_HYBRID_MASKS", ""), "SAGE_HYBRID_MASKS"
             ),
             stop_on_hit=os.getenv("SAGE_STOP_ON_HIT", "false")
             .strip()

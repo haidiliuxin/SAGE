@@ -33,6 +33,9 @@ class StrategyId(StrEnum):
     S3 = "S3"
     S4 = "S4"
     S5 = "S5"
+    # S6/S7 为原生攻击单元：候选由 hashcat 自己枚举（掩码/混合），管线不物化明文空间。
+    S6 = "S6"
+    S7 = "S7"
 
 
 class PlannerType(StrEnum):

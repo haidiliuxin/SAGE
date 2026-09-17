@@ -143,6 +143,8 @@ class _RunState:
     research_stop_reason: str | None = None
     stop_on_hit: bool = False
     candidate_stream: CandidatePlanStream | None = None
+    # 本次运行可用的外部词表（服务器端配置或任务上传），供混合攻击使用。
+    native_wordlist: Path | None = None
 
 
 class RealExecutor:
@@ -425,6 +427,16 @@ class RealExecutor:
                     native_pending=(
                         native_wordlist is not None
                         and item.strategy_id == StrategyId.S1
+                    )
+                    or _parameter_native_arm(
+                        _StrategyState(
+                            strategy_id=item.strategy_id.value,
+                            strategy_name=item.strategy_name,
+                            priority=item.priority,
+                            time_budget=item.time_budget,
+                            candidate_budget=item.candidate_budget,
+                            parameters=item.parameters,
+                        )
                     ),
                 )
             )
@@ -524,6 +536,7 @@ class RealExecutor:
             expected_candidates=expected,
             scheduler=scheduler,
             candidate_stream=candidate_stream,
+            native_wordlist=native_wordlist,
             stop_on_hit=(
                 payload.stop_on_hit
                 if payload.stop_on_hit is not None
@@ -883,8 +896,8 @@ class RealExecutor:
                 return
 
             item = by_strategy[decision.strategy_id]
-            if item.native_wordlist_path is not None:
-                # 原生词表攻击：不经过 Python 候选，hashcat 自己读整本字典。
+            if item.native_wordlist_path is not None or _parameter_native_arm(item):
+                # 原生攻击（外部词表 / 掩码 / 混合）：候选由 hashcat 自己枚举。
                 candidates: tuple[str, ...] = ()
             elif state.candidate_stream is not None:
                 candidate_batch = state.candidate_stream.pull(
@@ -925,6 +938,37 @@ class RealExecutor:
                             candidate_estimate=item.candidate_budget,
                         )
                     )
+                    item.native_pending = False
+                elif _parameter_native_arm(item):
+                    native_job = _hashcat_job_for_strategy(
+                        run_id=(
+                            f"{state.run_id}-{item.strategy_id}-"
+                            f"{item.scheduled_batches}"
+                        ),
+                        target_hashes=state.targets,
+                        hash_mode=state.hash_mode,
+                        candidates=(),
+                        timeout_seconds=decision.time_limit,
+                        candidate_budget=item.candidate_budget,
+                        parameters=item.parameters,
+                        session_dir=None,
+                    )
+                    wordlist = state.native_wordlist
+                    if native_job.attack_mode in {0, 6, 7}:
+                        if wordlist is None:
+                            # 混合/词表攻击需要字典：没有字典就让出该单元，不拖垮整个运行。
+                            item.native_pending = False
+                            item.status = TaskStatus.COMPLETED.value
+                            item.finished_at = now_iso()
+                            item.message = "该原生攻击需要词表，本次未配置词表"
+                            continue
+                        native_job = replace(
+                            native_job,
+                            wordlist_path=wordlist,
+                            candidate_budget=0,
+                            candidate_estimate=item.candidate_budget,
+                        )
+                    handle = self.hashcat.start(native_job)
                     item.native_pending = False
                 else:
                     handle = self.hashcat.start(
@@ -1247,6 +1291,8 @@ class RealExecutor:
                     and item.strategy_id == StrategyId.S1.value
                 ):
                     item.native_wordlist_path = native_wordlist
+                    item.native_pending = item.consumed_batches == 0
+                elif _parameter_native_arm(item):
                     item.native_pending = item.consumed_batches == 0
         with self.session_factory() as session:
             existing = StrategyRunRepository(session).list_by_run_id(run_id)
@@ -1835,6 +1881,16 @@ def _strategy_result_time(item: _StrategyState) -> float:
     return item.time_cost
 
 
+def _parameter_native_arm(item: "_StrategyState") -> bool:
+    """计划参数声明为原生攻击（掩码/混合）的单元：候选由 hashcat 自己枚举。"""
+    if item.parameters.get("hashcat_masks") or item.parameters.get("hashcat_hybrid_mask"):
+        return True
+    try:
+        return int(item.parameters.get("hashcat_attack_mode", 0) or 0) in {3, 6, 7}
+    except (TypeError, ValueError):
+        return False
+
+
 def _next_batch_sizes(
     state: _RunState,
     stream_batch_size: int,
@@ -1853,7 +1909,7 @@ def _next_batch_sizes(
         }
     # 原生词表攻击覆盖该单元：它在 Python 候选流之外，单独记一次可用量。
     for item in state.strategies:
-        if item.native_wordlist_path is not None:
+        if item.native_wordlist_path is not None or _parameter_native_arm(item):
             sizes[item.strategy_id] = (
                 item.candidate_budget if item.native_pending else 0
             )

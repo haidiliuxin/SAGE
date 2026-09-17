@@ -32,6 +32,8 @@ STRATEGY_NAMES = {
     StrategyId.S3: "Statistical Model",
     StrategyId.S4: "Personalized",
     StrategyId.S5: "Transfer",
+    StrategyId.S6: "Mask / Brute",
+    StrategyId.S7: "Hybrid",
 }
 
 
@@ -384,6 +386,8 @@ RULE_WEIGHTS: dict[VerificationCost, dict[StrategyId, float]] = {
         StrategyId.S3: 0.30,
         StrategyId.S4: 0.20,
         StrategyId.S5: 0.20,
+        StrategyId.S6: 0.1,
+        StrategyId.S7: 0.1,
     },
     VerificationCost.MEDIUM: {
         StrategyId.S1: 0.30,
@@ -391,6 +395,8 @@ RULE_WEIGHTS: dict[VerificationCost, dict[StrategyId, float]] = {
         StrategyId.S3: 0.20,
         StrategyId.S4: 0.20,
         StrategyId.S5: 0.20,
+        StrategyId.S6: 0.1,
+        StrategyId.S7: 0.1,
     },
     VerificationCost.HIGH: {
         StrategyId.S1: 0.45,
@@ -398,6 +404,8 @@ RULE_WEIGHTS: dict[VerificationCost, dict[StrategyId, float]] = {
         StrategyId.S3: 0.08,
         StrategyId.S4: 0.30,
         StrategyId.S5: 0.30,
+        StrategyId.S6: 0.08,
+        StrategyId.S7: 0.08,
     },
     VerificationCost.UNKNOWN: {
         StrategyId.S1: 0.35,
@@ -421,7 +429,27 @@ STRATEGY_REASONS = {
     StrategyId.S3: "使用已配置的统计模型按概率或分数扩展候选覆盖",
     StrategyId.S4: "利用当前用户授权的个人信息、旧口令及其抽象结构生成个性化候选",
     StrategyId.S5: "将跨任务抽象结构模式应用于当前任务授权种子",
+    StrategyId.S6: "按字符集与长度递增枚举掩码，覆盖字典之外的组合",
+    StrategyId.S7: "词表与掩码混合，覆盖词根加短后缀的组合",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class NativeAttackSettings:
+    """原生攻击（hashcat 自己枚举候选）的配置。
+
+    - rules_path：规则文件，S2 以 `-r` 运行词表种子；
+    - mask_ladder：掩码阶梯，每个掩码一次 `-a 3` 原生批次；
+    - hybrid_masks：词表 + 掩码的混合攻击掩码（`-a 6`）。
+    """
+
+    rules_path: str | None = None
+    mask_ladder: tuple[str, ...] = ()
+    hybrid_masks: tuple[str, ...] = ()
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.rules_path or self.mask_ladder or self.hybrid_masks)
 
 
 class RulePlanner:
@@ -432,9 +460,11 @@ class RulePlanner:
         *,
         validator: PolicyValidator | None = None,
         fallback: MockPlanner | None = None,
+        native_attacks: NativeAttackSettings | None = None,
     ) -> None:
         self.validator = validator or PolicyValidator()
         self.fallback = fallback or MockPlanner()
+        self.native_attacks = native_attacks or NativeAttackSettings()
 
     def plan(
         self,
@@ -452,6 +482,11 @@ class RulePlanner:
                 order.append(StrategyId.S4)
         if knowledge_summary and knowledge_summary.available:
             order.insert(1, StrategyId.S5)
+        # 原生攻击：掩码阶梯与混合掩码按需追加为独立调度单元（候选由 hashcat 枚举）。
+        if self.native_attacks.mask_ladder:
+            order.append(StrategyId.S6)
+        if self.native_attacks.hybrid_masks:
+            order.append(StrategyId.S7)
 
         candidate_limit = max(
             1,
@@ -484,6 +519,7 @@ class RulePlanner:
                     strategy_id,
                     prir.verification_cost,
                     candidate_allocations[strategy_id],
+                    native=self.native_attacks,
                 ),
             )
             for index, strategy_id in enumerate(selected, start=1)
@@ -521,7 +557,15 @@ class RulePlanner:
 def build_planner(settings: Settings) -> MockPlanner | RulePlanner | LLMPlanner:
     if settings.planner_type == PlannerType.MOCK:
         return MockPlanner()
-    rule_planner = RulePlanner()
+    rule_planner = RulePlanner(
+        native_attacks=NativeAttackSettings(
+            rules_path=(
+                str(settings.rules_path) if settings.rules_path is not None else None
+            ),
+            mask_ladder=tuple(settings.mask_ladder),
+            hybrid_masks=tuple(settings.hybrid_masks),
+        )
+    )
     if settings.planner_type == PlannerType.RULE:
         return rule_planner
     if settings.planner_type != PlannerType.LLM:
@@ -589,11 +633,13 @@ def _rule_parameters(
     strategy_id: StrategyId,
     cost: VerificationCost,
     candidate_budget: int,
+    native: "NativeAttackSettings | None" = None,
 ) -> dict[str, Any]:
+    settings = native or NativeAttackSettings()
     if strategy_id == StrategyId.S1:
         return {}
     if strategy_id == StrategyId.S2:
-        return {
+        parameters: dict[str, Any] = {
             "capitalize_first": True,
             "all_upper": True,
             "all_lower": True,
@@ -601,6 +647,22 @@ def _rule_parameters(
             "year_suffix": True,
             "common_substitution": True,
             "symbol_suffix": True,
+        }
+        if settings.rules_path:
+            # 交给 hashcat 的 -r 规则引擎执行，掩码/规则不展开为 Python 候选。
+            parameters["hashcat_rule_files"] = [settings.rules_path]
+        return parameters
+    if strategy_id == StrategyId.S6:
+        # 掩码阶梯：掩码作为 hashcat 参数（-a 3），空间由 hashcat 自己枚举。
+        return {
+            "hashcat_attack_mode": 3,
+            "hashcat_masks": list(settings.mask_ladder),
+        }
+    if strategy_id == StrategyId.S7:
+        # 混合攻击：词表 + 掩码（-a 6），掩码直接作为 hashcat 参数。
+        return {
+            "hashcat_attack_mode": 6,
+            "hashcat_hybrid_mask": list(settings.hybrid_masks),
         }
     if strategy_id == StrategyId.S3:
         if cost == VerificationCost.HIGH:

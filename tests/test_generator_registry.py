@@ -133,7 +133,10 @@ def test_default_registry_registers_only_implemented_generators():
     registry = build_default_registry()
     assert registry.registered_ids() == (
         "baseline", "rule", "pcfg_lite", "pcfg_full", "markov", "context",
-        "history", "hybrid", "pattern_knowledge", "transfer"
+        "history", "hybrid", "pattern_knowledge", "transfer",
+        # 原生攻击单元（S6 掩码/暴力、S7 混合）：候选由 hashcat 自己枚举，
+        # 这里注册的是不产出候选的占位生成器，供调度器记账使用。
+        "mask", "hybrid_mask",
     )
     assert all(generator_id not in registry for generator_id in FUTURE_GENERATOR_IDS)
     assert isinstance(registry.get("baseline"), GeneratorProtocol)
