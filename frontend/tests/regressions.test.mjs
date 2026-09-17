@@ -200,6 +200,27 @@ test('result view shows recovered plaintext instead of only a count', async (t) 
   assert.ok(copy, '恢复结果应提供复制按钮')
 })
 
+test('mock runs explain that simulated statistics contain no plaintext', async (t) => {
+  const remote = remoteFlow(['S1'], { result: { total_recovered: 6, recovered_items: [] } })
+  const form = await openForm(t, remote.handler)
+  await form.submit()
+
+  const pageText = text(form.renderer.root)
+  assert.match(pageText, /恢复结果/)
+  assert.match(pageText, /模拟执行（Mock）：只产生模拟统计，没有真实明文/)
+})
+
+test('real runs without a hit say so instead of staying silent', async (t) => {
+  const remote = remoteFlow(['S1'], { result: { total_recovered: 0, recovered_items: [] } })
+  const form = await openForm(t, remote.handler)
+  await act(async () => form.select('执行模式').props.onChange({ target: { value: 'real' } }))
+  await form.submit()
+
+  const pageText = text(form.renderer.root)
+  assert.match(pageText, /本次真实运行未恢复出明文/)
+  assert.match(pageText, /候选空间或预算已耗尽/)
+})
+
 test('plan panel explains when S4 and S5 are absent from the plan', async (t) => {
   const form = await openForm(t, remoteFlow(['S1', 'S2', 'S3']).handler)
   await form.submit()

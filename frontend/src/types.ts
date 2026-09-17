@@ -198,4 +198,5 @@ export interface FlowSnapshot {
   run: RunCreated | null
   status: RunStatus | null
   result: RunResult | null
+  executedMode: ExecutionMode | null
 }

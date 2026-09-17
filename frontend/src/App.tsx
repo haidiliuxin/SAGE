@@ -53,6 +53,7 @@ const initialSnapshot: FlowSnapshot = {
   run: null,
   status: null,
   result: null,
+  executedMode: null,
 }
 
 const stageLabels: Record<FlowStage, string> = {
@@ -458,6 +459,7 @@ function App() {
       setSnapshot((current) => ({
         ...current,
         run,
+        executedMode: executionMode,
         task: current.task ? { ...current.task, status: run.status } : null,
       }))
 
@@ -769,6 +771,15 @@ function App() {
                       ))}
                     </ul>
                     <p className="panel-note">明文仅在本地界面展示，用于本次授权的离线评测复核，不写入跨任务知识库。</p>
+                  </article>
+                )}
+
+                {snapshot.result && (snapshot.result.recovered_items ?? []).length === 0 && (
+                  <article className="panel recovered-panel">
+                    <div className="panel-head"><div><span className="section-kicker">RECOVERED</span><h2>恢复结果</h2></div><span className="panel-tag">无明文</span></div>
+                    <p>{snapshot.executedMode === 'mock'
+                      ? '本次为模拟执行（Mock）：只产生模拟统计，没有真实明文。把执行模式切换为「Real 本机 Hashcat」后重新评测，即可得到真实恢复结果。'
+                      : '本次真实运行未恢复出明文：候选空间或预算已耗尽，或口令不在本次计划生成的候选内。可提高候选/时间预算，补充个人信息、授权关键词或历史旧口令后重试。'}</p>
                   </article>
                 )}
               </>

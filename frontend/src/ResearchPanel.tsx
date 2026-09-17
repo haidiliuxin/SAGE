@@ -131,7 +131,7 @@ export function ResearchPanel({ runId }: { runId: string }) {
   </section>
 }
 
-export function RunResultView({ runId }: { runId: string }) {
+export function RunResultView({ runId, mode }: { runId: string; mode?: string }) {
   const [result, setResult] = useState<RunResult | null>(null)
   const [error, setError] = useState('')
   const [retry, setRetry] = useState(0)
@@ -169,7 +169,9 @@ export function RunResultView({ runId }: { runId: string }) {
           <button type="button" className="button secondary" onClick={() => void copy(item.plaintext)}>{copied === item.plaintext ? '已复制' : '复制'}</button>
           <small className="recovered-target">来源目标 {item.target.length > 28 ? `${item.target.slice(0, 28)}…` : item.target}</small>
         </li>)}</ul>
-      : <p>该运行没有恢复出明文（可能是 Mock 运行、未命中或反馈未知结束）。</p>}
+      : <p>{mode === 'mock'
+          ? '本次为模拟执行（Mock）：只产生模拟统计，没有真实明文。'
+          : '该次真实运行没有恢复出明文（候选或预算耗尽，或口令不在计划候选内）。'}</p>}
     {result.strategy_results?.length ? <table className="research-table"><thead><tr><th>策略</th><th>测试</th><th>恢复</th><th>耗时（秒）</th></tr></thead><tbody>
       {result.strategy_results.map(item => <tr key={item.strategy_id}><th>{item.strategy_id}</th><td>{num(item.tested)}</td><td>{num(item.recovered)}</td><td>{num(item.time)}</td></tr>)}
     </tbody></table> : null}
@@ -198,7 +200,7 @@ export function TaskRuns({ taskId, onOpen }: { taskId: string; onOpen: (runId: s
         <button className="button secondary" onClick={() => setResultRunId(current => current === run.run_id ? null : run.run_id)}>{resultRunId === run.run_id ? '收起结果' : '查看结果'}</button>
         <button className="button secondary" onClick={() => onOpen(run.run_id)}>查看研究详情</button>
       </div>
-      {resultRunId === run.run_id && <RunResultView runId={run.run_id} />}
+      {resultRunId === run.run_id && <RunResultView runId={run.run_id} mode={run.mode} />}
     </div>)}
     {page?.total === 0 && <p>此任务尚无运行记录。</p>}
     <div className="research-actions"><button disabled={!page || offset === 0} onClick={() => setOffset(Math.max(0, offset - 20))}>上一页</button><button disabled={!page || offset + page.items.length >= page.total} onClick={() => setOffset(offset + 20)}>下一页</button></div>
