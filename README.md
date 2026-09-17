@@ -37,6 +37,7 @@ SAGE-Pass 是面向异构离线口令安全评测任务的智能策略编排系�
 - 历史评分：S5 的 Pattern Knowledge 频次、任务覆盖、置信度和时效衰减形成 0～1 `transfer_score`，注入现有 `ArmSpec`；Bandit 公式和首轮探索规则保持不变；
 - 只读知识 API：`GET /api/feedback/patterns` 支持按目标类型、算法、模式类型和最低置信度过滤，响应不包含恢复明文、Hash 或文件内容；
 - 自适应预算与停止：Hashcat 每批返回的测试数、恢复数和耗时会更新调度评分；任务总预算、策略预算、时间预算或候选耗尽后停止继续分配；
+- 调度策略与实验（B 侧）：`fixed` / `round_robin` / `heuristic_bandit` / `ucb` / `cost_aware_ucb` 可选，提供成本标定、离线回放、研究日志与研究 API（`/api/runs/{run_id}/research*`）及前端研究面板；
 - LLM Planner：只向模型发送结构化 PRIR，使用严格 JSON Schema 输出，支持温度、超时、最大输出 token、进程内 TTL/LRU 缓存及异常降级；
 - Policy Validator：在计划进入执行链路前校验策略白名单、目标适用性、双预算、优先级和参数范围；
 - Rule Planner：无上下文按 S1→S2→S3，有上下文追加 S4；慢 Hash 将上下文高概率策略提前并限制候选池规模；

@@ -6,6 +6,245 @@
     "version": "0.5.0"
   },
   "paths": {
+    "/api/tasks/{task_id}/runs": {
+      "get": {
+        "tags": [
+          "research"
+        ],
+        "summary": "Task Runs",
+        "operationId": "task_runs_api_tasks__task_id__runs_get",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 20,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunPage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs/{run_id}/research": {
+      "get": {
+        "tags": [
+          "research"
+        ],
+        "summary": "Research Summary",
+        "operationId": "research_summary_api_runs__run_id__research_get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResearchSummary"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs/{run_id}/research/events": {
+      "get": {
+        "tags": [
+          "research"
+        ],
+        "summary": "Research Events",
+        "operationId": "research_events_api_runs__run_id__research_events_get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          },
+          {
+            "name": "after_sequence",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "After Sequence"
+            }
+          },
+          {
+            "name": "before_sequence",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before Sequence"
+            }
+          },
+          {
+            "name": "latest",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Latest"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResearchPage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs/{run_id}/research/download": {
+      "get": {
+        "tags": [
+          "research"
+        ],
+        "summary": "Research Download",
+        "operationId": "research_download_api_runs__run_id__research_download_get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/files": {
       "post": {
         "tags": [
@@ -1144,6 +1383,455 @@
           "plaintext"
         ],
         "title": "RecoveredItem"
+      },
+      "ResearchConfiguration": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "title": "Mode"
+          },
+          "policy_type": {
+            "type": "string",
+            "title": "Policy Type"
+          },
+          "policy_version": {
+            "type": "string",
+            "title": "Policy Version"
+          },
+          "policy_parameters": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "Policy Parameters"
+          },
+          "reward_version": {
+            "type": "string",
+            "title": "Reward Version"
+          },
+          "learning_reward": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Learning Reward"
+          },
+          "reward_weights": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "Reward Weights"
+          },
+          "reward_context": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                }
+              ]
+            },
+            "type": "object",
+            "title": "Reward Context"
+          },
+          "seed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seed"
+          },
+          "resume_from_round": {
+            "type": "integer",
+            "title": "Resume From Round",
+            "default": 0
+          },
+          "previous_arm_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Arm Id"
+          },
+          "decision_probability": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision Probability"
+          },
+          "verification_profile": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verification Profile"
+          }
+        },
+        "type": "object",
+        "required": [
+          "mode",
+          "policy_type",
+          "policy_version",
+          "reward_version",
+          "reward_weights",
+          "reward_context"
+        ],
+        "title": "ResearchConfiguration"
+      },
+      "ResearchEvent": {
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "title": "Sequence"
+          },
+          "schema_version": {
+            "type": "integer",
+            "title": "Schema Version"
+          },
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "attempt_id": {
+            "type": "string",
+            "title": "Attempt Id"
+          },
+          "round_index": {
+            "type": "integer",
+            "title": "Round Index"
+          },
+          "event_type": {
+            "type": "string",
+            "title": "Event Type"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Payload"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sequence",
+          "schema_version",
+          "run_id",
+          "attempt_id",
+          "round_index",
+          "event_type",
+          "payload"
+        ],
+        "title": "ResearchEvent"
+      },
+      "ResearchPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ResearchEvent"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "next_after_sequence": {
+            "type": "integer",
+            "title": "Next After Sequence"
+          },
+          "next_before_sequence": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Before Sequence"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "next_after_sequence",
+          "next_before_sequence",
+          "has_more"
+        ],
+        "title": "ResearchPage"
+      },
+      "ResearchState": {
+        "properties": {
+          "arms": {
+            "additionalProperties": {
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": "object"
+            },
+            "type": "object",
+            "title": "Arms"
+          },
+          "remaining_candidates": {
+            "type": "integer",
+            "title": "Remaining Candidates"
+          },
+          "remaining_time": {
+            "type": "number",
+            "title": "Remaining Time"
+          }
+        },
+        "type": "object",
+        "required": [
+          "arms",
+          "remaining_candidates",
+          "remaining_time"
+        ],
+        "title": "ResearchState"
+      },
+      "ResearchSummary": {
+        "properties": {
+          "schema_version": {
+            "type": "integer",
+            "title": "Schema Version",
+            "default": 1
+          },
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "available": {
+            "type": "boolean",
+            "title": "Available",
+            "default": false
+          },
+          "configuration": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResearchConfiguration"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "latest_decision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResearchEvent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "latest_completed": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResearchEvent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "latest_state": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResearchState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stop_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop Reason"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/ResearchTotals"
+          },
+          "through_sequence": {
+            "type": "integer",
+            "title": "Through Sequence",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "task_id",
+          "status"
+        ],
+        "title": "ResearchSummary"
+      },
+      "ResearchTotals": {
+        "properties": {
+          "completed_rounds": {
+            "type": "integer",
+            "title": "Completed Rounds",
+            "default": 0
+          },
+          "submitted_candidates": {
+            "type": "integer",
+            "title": "Submitted Candidates",
+            "default": 0
+          },
+          "tested_candidates": {
+            "type": "integer",
+            "title": "Tested Candidates",
+            "default": 0
+          },
+          "recovered_targets": {
+            "type": "integer",
+            "title": "Recovered Targets",
+            "default": 0
+          },
+          "duration": {
+            "type": "number",
+            "title": "Duration",
+            "default": 0
+          },
+          "evaluation_reward": {
+            "type": "number",
+            "title": "Evaluation Reward",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "ResearchTotals"
+      },
+      "RunPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RunReference"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit"
+          },
+          "offset": {
+            "type": "integer",
+            "title": "Offset"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "RunPage"
+      },
+      "RunReference": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          },
+          "mode": {
+            "type": "string",
+            "title": "Mode"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "task_id",
+          "mode",
+          "status"
+        ],
+        "title": "RunReference"
       },
       "RunResult": {
         "properties": {

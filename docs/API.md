@@ -44,8 +44,8 @@ ExecutionRequest.hashcat_mode
 
 - `POST /execute` 的真实执行仍读取规划结果，但“自适应”属于调度层：
   `SAGE_SCHEDULER_TYPE` ∈ `fixed` / `round_robin` / `heuristic_bandit` / `ucb` / `cost_aware_ucb` / `thompson`；
-- 当前可用：`fixed`（按优先级跑完一个 Arm 再下一个）、`round_robin`（轮流取批）、`heuristic_bandit`（默认，评分选择）；
-- `ucb` / `cost_aware_ucb` / `thompson` 尚未交付，配置后启动真实执行会返回明确 `422`，不会静默回退；
+- 当前可用：`fixed`（按优先级跑完一个 Arm 再下一个）、`round_robin`（轮流取批）、`heuristic_bandit`（默认，评分选择）、`ucb` 与 `cost_aware_ucb`（B 侧成本感知 UCB）；
+- `thompson` 尚未交付，配置后启动真实执行会返回明确 `422`，不会静默回退；
 - `SAGE_PLANNER_TYPE=adaptive` 已弃用：会在配置解析阶段抛出明确迁移错误（提示改用 `SAGE_SCHEDULER_TYPE`），不再静默回退 Mock；
 - `GET /api/system/config` 返回 `planner_type` 与 `scheduler_type`，前端据此把“自适应”显示为**调度模式**。
 
@@ -64,6 +64,17 @@ ExecutionRequest.hashcat_mode
 
 `/runs/{run_id}/status` 与 `/runs/{run_id}/result` 的解析顺序：内存 registry → `RunRecordModel` 持久化记录（重建真实 tested/recovered/time 与 recovered_items）→ Mock StrategyRun。
 因此服务重启后仍能查询已完成真实运行的原始结果，且不会被 MockExecutor 覆盖；损坏/不兼容记录返回明确错误。
+
+## 研究与实验 API（B 侧）
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/tasks/{task_id}/runs` | 列出该任务的历史运行（含研究日志可用性） |
+| GET | `/api/runs/{run_id}/research` | 某次运行的研究摘要（步骤、策略、奖励、成本） |
+| GET | `/api/runs/{run_id}/research/events` | 逐条决策事件（DecisionEvent 风格，无恢复明文） |
+| GET | `/api/runs/{run_id}/research/download` | 下载研究日志（JSONL/SQLite 导出） |
+
+实验与回放 CLI 见 `docs/decision/`，示例场景在 `examples/replay/`。
 
 ## 基础 HTTP API
 
