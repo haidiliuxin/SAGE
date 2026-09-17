@@ -1,0 +1,6 @@
+{
+  "exploration_coefficient": 1.4142135623730951,
+  "startup_prior": 0.0,
+  "seconds_per_candidate_prior": 0.01,
+  "minimum_cost": 0.000001
+}

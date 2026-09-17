@@ -1,0 +1,20 @@
+{
+  "arms": [
+    {"arm_id": "slow", "strategy_id": "S1", "generator_id": "synthetic-slow", "priority": 1, "candidate_budget": 4, "time_budget": 6},
+    {"arm_id": "fast", "strategy_id": "S2", "generator_id": "synthetic-fast", "priority": 2, "candidate_budget": 4, "time_budget": 6}
+  ],
+  "candidate_streams": {
+    "slow": ["s1", "s2", "s3", "s4"],
+    "fast": ["f1", "f2", "f3", "f4"]
+  },
+  "target_ids": ["u1", "u2", "u3", "u4", "unreachable"],
+  "matches": {"s1": ["u1"], "s3": ["u2"], "f1": ["u3"], "f3": ["u4"]},
+  "total_candidate_budget": 8,
+  "total_time_budget": 6,
+  "batch_size": 1,
+  "seed": 42,
+  "arm_costs": {
+    "slow": {"startup_cost": 0.5, "seconds_per_candidate": 2.0},
+    "fast": {"startup_cost": 0.1, "seconds_per_candidate": 0.2}
+  }
+}
