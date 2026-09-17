@@ -13,6 +13,7 @@ import type {
   TaskInput,
   TaskStatus,
 } from '../types'
+import type { ResearchPage, ResearchSummary, RunPage } from '../research-types'
 const baseUrl = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
 
 export class ApiError extends Error {
@@ -45,6 +46,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  getTaskRuns(taskId: string, offset = 0) {
+    return request<RunPage>(`/api/tasks/${encodeURIComponent(taskId)}/runs?limit=20&offset=${offset}`)
+  },
+  getResearch(runId: string) {
+    return request<ResearchSummary>(`/api/runs/${encodeURIComponent(runId)}/research`)
+  },
+  getResearchEvents(runId: string, before?: number) {
+    const query = before === undefined ? 'latest=true' : `before_sequence=${before}`
+    return request<ResearchPage>(`/api/runs/${encodeURIComponent(runId)}/research/events?limit=50&${query}`)
+  },
+  researchDownloadUrl(runId: string) {
+    return `${baseUrl}/api/runs/${encodeURIComponent(runId)}/research/download`
+  },
   health() {
     return request<{ status: string }>('/health')
   },

@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 import time
 import logging
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
@@ -24,6 +24,10 @@ from .hashcat_adapter import (
     resolve_hashcat_mode,
 )
 from .interfaces import BatchOutcome, DecisionEvent
+from .decision.rewards import RewardWeights, RewardContext
+from .decision.research_log import ResearchRecorder, SqliteResearchLog
+from .decision.costs import UCBConfig
+from .decision.ucb import UCBScheduler
 from .models import RunRecordModel
 from .repository import (
     FileRepository,
@@ -38,6 +42,7 @@ from .scheduler import (
     ArmSpec,
     SchedulerStopReason,
     build_scheduler,
+    decision_diagnostics,
 )
 from .schemas import (
     ExecutionRequest,
@@ -109,6 +114,9 @@ class _RunState:
     current_strategy_id: str | None = None
     decision_events: list[DecisionEvent] = field(default_factory=list)
     round_index: int = 0
+    research: ResearchRecorder | None = None
+    research_previous_arm: str | None = None
+    research_stop_reason: str | None = None
 
 
 class RealExecutor:
@@ -130,6 +138,9 @@ class RealExecutor:
         zip_extractor: ZipHashExtractor | None = None,
         candidate_generator: CandidateGenerator | None = None,
         control: RunControl | None = None,
+        research_log: SqliteResearchLog | None = None,
+        reward_weights: RewardWeights | None = None,
+        ucb_config: UCBConfig | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.settings = settings
@@ -151,6 +162,9 @@ class RealExecutor:
         self._registry: dict[str, _RunState] = {}
         self._task_runs: dict[str, set[str]] = {}
         self._lock = threading.RLock()
+        self._research_log = research_log
+        self.reward_weights = reward_weights or RewardWeights()
+        self.ucb_config = ucb_config or UCBConfig()
 
     # ------------------------------------------------------------------ 查询
     def has_run(self, run_id: str) -> bool:
@@ -351,6 +365,10 @@ class RealExecutor:
             },
             scheduler_type=self.settings.scheduler_type.value,
         )
+        # Freeze reward configuration with the run; a later service default
+        # must not change the interpretation of resumed batches.
+        snapshot["research_reward_weights"] = asdict(self.reward_weights)
+        snapshot["ucb_config"] = asdict(self.ucb_config)
         record = RunRecordModel(
             run_id=run_id,
             task_id=task.task_id,
@@ -387,6 +405,7 @@ class RealExecutor:
                 arms,
                 total_candidate_budget=task.candidate_budget,
                 total_time_budget=float(plan.total_time_budget),
+                initial_targets=len(set(targets)), ucb_config=self.ucb_config,
             )
         except ValueError as exc:
             raise AppError(
@@ -424,6 +443,12 @@ class RealExecutor:
         )
 
     # ------------------------------------------------------------------ 持久化读取
+    def research_log_reader(self) -> SqliteResearchLog | None:
+        """Open the configured journal without creating a missing database."""
+        path = (self._research_log.path if self._research_log is not None else
+                self.settings.upload_dir.parent / "research" / "real.sqlite3")
+        return SqliteResearchLog(path, read_only=True) if path.is_file() else None
+
     def has_record(self, run_id: str) -> bool:
         """是否存在该 run 的持久化记录（用于重启后查询真实结果）。"""
         with self.session_factory() as session:
@@ -612,12 +637,24 @@ class RealExecutor:
     def _run_worker(self, run_id: str) -> None:
         state = self._registry[run_id]
         try:
+            self._begin_research(state)
             self._execute_strategies(state)
         except AppError as exc:
             state.failed_launch = exc.message
         except Exception as exc:  # pragma: no cover - 防御未知异常
             state.failed_launch = f"内部错误：{exc}"
         finally:
+            if state.research is not None:
+                try:
+                    state.research.finish(
+                        "cancelled" if state.cancel_requested else (
+                            state.research_stop_reason or ("failed" if state.failed_launch else "completed")
+                        ),
+                        state=state.scheduler.snapshot_statistics(),
+                    )
+                except Exception as exc:
+                    state.persist_error = f"研究日志写入失败：{type(exc).__name__}"
+                    state.failed_launch = "研究日志未能完整保存"
             self._finalize_run(state)
             persisted = False
             try:
@@ -653,6 +690,7 @@ class RealExecutor:
         scheduler = state.scheduler
         if scheduler is None:  # pragma: no cover - start() always installs one
             raise RuntimeError("Bandit scheduler is unavailable")
+        self._begin_research(state)
         by_strategy = {item.strategy_id: item for item in state.strategies}
 
         while True:
@@ -663,6 +701,8 @@ class RealExecutor:
                 self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
                 return
             next_batch_sizes = _next_batch_sizes(state.strategies)
+            prior_state = scheduler.snapshot_statistics()
+            diagnostics = decision_diagnostics(scheduler, next_batch_sizes)
             decision = scheduler.select(next_batch_sizes)
             if decision is None:
                 self._complete_scheduled_execution(
@@ -677,8 +717,12 @@ class RealExecutor:
             item.next_batch_index += 1
             item.scheduled_batches += 1
             state.round_index += 1
-            prior_state = scheduler.snapshot_statistics()
-            prior_scores = _decision_scores(scheduler, next_batch_sizes)
+            prior_scores = {key: value.score for key, value in diagnostics["scores"].items()}
+            if state.research is not None:
+                state.research.begin(
+                    decision=decision, available=diagnostics["available"],
+                    scores=diagnostics["scores"], prior_state=prior_state,
+                )
             item.started_at = item.started_at or now_iso()
             with self._lock:
                 state.current_strategy_id = item.strategy_id
@@ -703,6 +747,7 @@ class RealExecutor:
                 item.finished_at = now_iso()
                 item.message = exc.message
                 state.failed_launch = exc.message
+                state.research_stop_reason = "launch_failed"
                 return
             item.handle = handle
             with self._lock:
@@ -733,6 +778,7 @@ class RealExecutor:
                 item.finished_at = now_iso()
                 item.message = f"等待 Hashcat 失败：{exc}"
                 state.failed_launch = item.message
+                state.research_stop_reason = "execution_failed"
                 return
             finally:
                 item.handle = None
@@ -747,7 +793,8 @@ class RealExecutor:
             if result.status == TaskStatus.FAILED:
                 item.status = TaskStatus.FAILED.value
                 item.finished_at = now_iso()
-                state.failed_launch = result.message
+                state.failed_launch = result.message or "执行失败"
+                state.research_stop_reason = "execution_failed"
                 return
             item.consumed_batches += 1
             self._checkpoint(state)
@@ -763,7 +810,15 @@ class RealExecutor:
         candidates: tuple[str, ...],
         result: HashcatResult,
     ) -> BatchOutcome:
+        already_recovered = {
+            credential.target for strategy in state.strategies
+            for credential in strategy.recovered_items
+        }
         recovered = self._accumulate_result(item, result)
+        new_targets = {
+            credential.target for credential in result.recovered
+            if credential.target in state.targets
+        } - already_recovered
         item.time_cost += result.duration
         outcome = BatchOutcome(
             run_id=state.run_id,
@@ -772,19 +827,27 @@ class RealExecutor:
             batch_index=item.scheduled_batches,
             candidate_count=len(candidates),
             tested=result.tested,
-            recovered=recovered,
+            recovered=len(new_targets),
             duration=result.duration,
             status=result.status,
             exit_code=result.exit_code,
             message=result.message,
         )
-        scheduler.observe(
-            item.strategy_id,
-            candidate_count=outcome.candidate_count,
-            tested=outcome.tested,
-            recovered=outcome.recovered,
-            duration=outcome.duration,
-        )
+        if isinstance(scheduler, UCBScheduler):
+            remaining_time = min(scheduler.total_time_budget - scheduler.total_time_cost,
+                                 scheduler._arms[item.strategy_id].time_budget - scheduler.statistics(item.strategy_id).time_cost)
+            # A raw progress count can overcount whole candidates for multiple
+            # salts. Only an exhausted, non-recovering batch is safe to fit.
+            complete = (result.status == TaskStatus.COMPLETED and result.exit_code == 1
+                        and not result.recovered and result.duration < remaining_time)
+            scheduler.observe(item.strategy_id, candidate_count=outcome.candidate_count,
+                              tested=outcome.tested, recovered=outcome.recovered,
+                              duration=outcome.duration, complete=complete, cost_tested_known=complete)
+        else:
+            scheduler.observe(
+                item.strategy_id, candidate_count=outcome.candidate_count,
+                tested=outcome.tested, recovered=recovered, duration=outcome.duration,
+            )
         return outcome
 
     def _record_decision_event(
@@ -798,9 +861,18 @@ class RealExecutor:
         stop_reason: str | None = None,
     ) -> None:
         """记录一次调度决策（研究日志；不含恢复明文）。"""
-        reward = (
-            outcome.recovered / outcome.tested if outcome.tested > 0 else 0.0
+        if state.research is None:
+            raise RuntimeError("research logging must start before batch execution")
+        reason = stop_reason or (
+            "cancelled" if state.cancel_requested or outcome.status == TaskStatus.CANCELLED else
+            "execution_failed" if outcome.status == TaskStatus.FAILED else
+            state.scheduler.stop_reason(_next_batch_sizes(state.strategies))
         )
+        logged = state.research.complete(
+            outcome, updated_state=state.scheduler.snapshot_statistics(),
+            stop_reason=reason,
+        )
+        state.research_previous_arm = item.strategy_id
         event = DecisionEvent(
             run_id=state.run_id,
             round_index=state.round_index,
@@ -811,15 +883,57 @@ class RealExecutor:
             exploration=decision.exploration,
             scores=prior_scores,
             score_breakdown=decision.score,
-            prior_state=prior_state.get(item.strategy_id, {}),
-            feedback=outcome,
-            reward=reward,
-            stop_reason=stop_reason,
+            prior_state=prior_state,
+            feedback=replace(outcome, message=""),
+            reward=logged["reward"],
+            stop_reason=reason,
         )
         with self._lock:
             state.decision_events.append(event)
             if len(state.decision_events) > 200:
                 del state.decision_events[:-200]
+
+    def _begin_research(self, state: _RunState) -> None:
+        if state.research is not None:
+            return
+        with self._lock:
+            if self._research_log is None:
+                self._research_log = SqliteResearchLog(
+                    self.settings.upload_dir.parent / "research" / "real.sqlite3"
+                )
+        weights = self.reward_weights
+        with self.session_factory() as session:
+            record = RunRecordRepository(session).get(state.run_id)
+            if record is not None:
+                if record.snapshot.get("research_reward_weights"):
+                    weights = RewardWeights(**record.snapshot["research_reward_weights"])
+                else:
+                    # Freeze defaults on first research-enabled resume of an old run.
+                    record.snapshot = {**record.snapshot, "research_reward_weights": asdict(weights)}
+                    RunRecordRepository(session).save(record)
+        scheduler = state.scheduler
+        names = {
+            "BanditScheduler": "heuristic_bandit", "FixedOrderScheduler": "fixed",
+            "RoundRobinScheduler": "round_robin",
+        }
+        parameters = {"exploration_rounds": scheduler.exploration_rounds}
+        if hasattr(scheduler, "weights"):
+            parameters.update(asdict(scheduler.weights))
+        policy_name = names.get(type(scheduler).__name__, self.settings.scheduler_type.value)
+        if isinstance(scheduler, UCBScheduler):
+            policy_name = "cost_aware_ucb" if scheduler.cost_aware else "ucb"
+            parameters = asdict(scheduler.config)
+        state.research = ResearchRecorder(
+            run_id=state.run_id,
+            policy_type=policy_name,
+            context=RewardContext(
+                len(set(state.targets)), scheduler.total_candidate_budget,
+                scheduler.total_time_budget,
+            ),
+            weights=weights, store=self._research_log, mode="real",
+            resume_from_round=state.round_index,
+            previous_arm_id=state.research_previous_arm, policy_parameters=parameters,
+        )
 
     # ------------------------------------------------------------------ 持久化
     def _checkpoint(self, state: _RunState) -> None:
@@ -837,6 +951,8 @@ class RealExecutor:
                 )
                 record.updated_at = now_iso()
                 RunRecordRepository(session).save(record)
+            if state.research is not None:
+                state.research.checkpoint()
         except Exception as exc:  # pragma: no cover - 检查点失败不应中断执行
             state.persist_error = f"检查点写库失败：{exc}"
 
@@ -912,6 +1028,10 @@ class RealExecutor:
                 snapshot.get("expected_candidates", 0)
             ),
             scheduler=scheduler,
+            round_index=int(progress.get(
+                "round_index", sum(item.consumed_batches for item in strategies)
+            )),
+            research_previous_arm=progress.get("research_previous_arm"),
         )
         with self._lock:
             self._registry[run_id] = state
@@ -956,6 +1076,7 @@ class RealExecutor:
         state: _RunState,
         reason: SchedulerStopReason | None,
     ) -> None:
+        state.research_stop_reason = reason.value if reason is not None else "completed"
         finished_at = now_iso()
         for item in state.strategies:
             if item.status != TaskStatus.RUNNING.value:
@@ -1239,7 +1360,11 @@ def _serialize_progress(state: _RunState) -> dict[str, Any]:
             for item in state.strategies
         },
         "scheduler_stats": scheduler_stats,
+        "scheduler_snapshot": state.scheduler.snapshot() if state.scheduler is not None else None,
         "round_index": state.round_index,
+        "research_previous_arm": state.research_previous_arm,
+        "research_log_version": 1,
+        "research_attempt_id": state.research.attempt_id if state.research else None,
         "decision_events": [
             event.as_dict() for event in state.decision_events[-50:]
         ],
@@ -1324,10 +1449,18 @@ def _scheduler_from_snapshot(
             )
         ),
         total_time_budget=float(plan_meta["total_time_budget"]),
+        initial_targets=len(set(snapshot["targets"])),
+        ucb_config=UCBConfig(**snapshot.get("ucb_config", {})),
     )
-    stats = progress.get("scheduler_stats") or {}
-    if stats:
-        scheduler.restore_statistics(stats)
+    full_snapshot = progress.get("scheduler_snapshot")
+    if full_snapshot is not None:
+        scheduler.restore(full_snapshot)
+    else:
+        stats = progress.get("scheduler_stats") or {}
+        if isinstance(scheduler, UCBScheduler) and (stats or any(item.consumed_batches for item in strategies)):
+            raise ValueError("UCB resume requires a full scheduler snapshot")
+        if stats:
+            scheduler.restore_statistics(stats)
     return scheduler
 
 
@@ -1373,21 +1506,6 @@ def _record_default_message(status: TaskStatus) -> str:
     if status == TaskStatus.PAUSED:
         return "真实执行已暂停"
     return "真实执行中"
-
-
-def _decision_scores(
-    scheduler: Any, next_batch_sizes: dict[str, int]
-) -> dict[str, float]:
-    """决策前各可用 Arm 的评分快照（写入 DecisionEvent）。"""
-    scores: dict[str, float] = {}
-    for strategy_id, size in next_batch_sizes.items():
-        if size <= 0:
-            continue
-        try:
-            scores[strategy_id] = scheduler.score(strategy_id, size).score
-        except Exception:  # pragma: no cover - 评分失败不影响调度
-            continue
-    return scores
 
 
 def _to_run_row(run_id: str, task_id: str, item: _StrategyState) -> Any:

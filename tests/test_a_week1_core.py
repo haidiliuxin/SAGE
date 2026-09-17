@@ -328,7 +328,7 @@ def test_scheduler_factory_builds_fixed_and_round_robin():
 
     with pytest.raises(ValueError):
         build_scheduler(
-            SchedulerType.UCB,
+            SchedulerType.THOMPSON,
             _arms(),
             total_candidate_budget=8,
             total_time_budget=10,

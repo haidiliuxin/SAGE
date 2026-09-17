@@ -46,7 +46,21 @@ SAGE-Pass 是面向异构离线口令安全评测任务的智能策略编排系�
 [接口对齐方案](docs/decision/interface-alignment.md)和
 [数学模型](docs/decision/mathematical-model.md)。离线回放复用 fixed、round_robin、
 heuristic_bandit，支持候选去重、双预算、目标级收益、完整轨迹和批次边界恢复。
-本阶段代码尚待使用方运行测试，未接入新的真实执行路径。
+第四步已接入真实执行与回放的统一奖励、SQLite 完整日志及 JSONL 导出，
+详见 [第四步交接](docs/handoff/b-milestone4.md)和
+[奖励与日志说明](docs/decision/reward-and-logging.md)。本次改动待使用方运行测试。
+
+第五步新增 UCB、在线成本拟合与 Cost-aware UCB，已接入真实执行与回放；
+CLI 的 `--policy all` 现在比较五种算法。公式与借鉴来源见
+[UCB 与成本模型](docs/decision/ucb-and-cost.md)，验收命令见
+[第五步交接](docs/handoff/b-milestone5.md)。第四步用户报告 79 项通过，第五步用户已确认测试和示例运行通过。
+
+成本标定器与四种盐条件模型现已补齐，提供真实测量、标定拟合、回放导入及近期吞吐。
+使用方式见 [成本与盐条件说明](docs/decision/calibration-and-salts.md)，
+交接与验收状态见 [补齐项交接](docs/handoff/b-calibration-salts.md)。本次新增内容待用户测试。
+
+B 研究数据现已接入执行工作台与历史运行详情，提供只读摘要、分页事件和完整脱敏日志下载。
+范围、字段约定、刷新／重启读取方式与验收命令见 [B 部分前端添加文档](docs/handoff/b-frontend-additions.md)。本次接入尚未运行测试或前端构建。
 
 在已安装项目的环境中比较三个基线：
 

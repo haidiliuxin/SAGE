@@ -1,4 +1,4 @@
-"""Reuse the three production algorithms through the DecisionPolicy methods."""
+"""Adapt legacy baselines and target-reward UCB to DecisionPolicy methods."""
 
 from __future__ import annotations
 
@@ -10,8 +10,9 @@ from typing import Any
 
 from ..enums import SchedulerType
 from ..interfaces import BatchOutcome
-from ..scheduler import build_scheduler
+from ..scheduler import build_scheduler, decision_diagnostics
 from .types import DecisionArm, DecisionFeedback, PolicyDecision, require_count, require_seconds
+from .costs import UCBConfig
 
 
 class BaselinePolicy:
@@ -25,12 +26,17 @@ class BaselinePolicy:
     def __init__(
         self, scheduler_type: SchedulerType | str, arms: Sequence[DecisionArm], *,
         total_candidate_budget: int, total_time_budget: float,
+        initial_targets: int | None = None, ucb_config: UCBConfig | None = None,
     ) -> None:
         self.scheduler_type = SchedulerType(scheduler_type)
         if self.scheduler_type not in {
             SchedulerType.FIXED, SchedulerType.ROUND_ROBIN, SchedulerType.HEURISTIC_BANDIT,
+            SchedulerType.UCB, SchedulerType.COST_AWARE_UCB,
         }:
-            raise ValueError("this milestone supports only fixed, round_robin, heuristic_bandit")
+            raise ValueError("this milestone does not support the requested policy")
+        self.is_ucb = self.scheduler_type in {SchedulerType.UCB, SchedulerType.COST_AWARE_UCB}
+        self.initial_targets = initial_targets
+        self.ucb_config = ucb_config or UCBConfig()
         require_count(total_candidate_budget, "total_candidate_budget", positive=True)
         require_seconds(total_time_budget, "total_time_budget", positive=True)
         if not arms or len({arm.arm_id for arm in arms}) != len(arms):
@@ -43,6 +49,7 @@ class BaselinePolicy:
             self.scheduler_type, [arm.legacy_spec() for arm in self.arms],
             total_candidate_budget=total_candidate_budget,
             total_time_budget=total_time_budget,
+            initial_targets=initial_targets, ucb_config=self.ucb_config,
         )
         self._target_counts = {arm.arm_id: 0 for arm in self.arms}
         self._recovered_ids: set[str] = set()
@@ -89,12 +96,15 @@ class BaselinePolicy:
         else:
             # Compatibility for the current single-target public outcome.
             hits = outcome.recovered
-            if hits > outcome.tested:
+            if hits > outcome.tested and not self.is_ucb:
                 raise ValueError("multi-target feedback requires successful_candidates")
-        self._engine.observe(
-            arm_id, candidate_count=outcome.candidate_count, tested=outcome.tested,
-            recovered=hits, duration=outcome.duration,
-        )
+        if self.is_ucb:
+            self._engine.observe_outcome(arm_id, outcome)
+        else:
+            self._engine.observe(
+                arm_id, candidate_count=outcome.candidate_count, tested=outcome.tested,
+                recovered=hits, duration=outcome.duration,
+            )
         self._target_counts[arm_id] += outcome.recovered
         if isinstance(outcome, DecisionFeedback):
             self._recovered_ids.update(outcome.recovered_target_ids)
@@ -105,7 +115,15 @@ class BaselinePolicy:
         reason = self._engine.stop_reason(next_batch_sizes)
         return reason.value if reason is not None else None
 
+    def diagnostics(self, next_batch_sizes: Mapping[str, int]) -> dict:
+        if self._pending is not None:
+            raise ValueError("diagnostics must be captured before select")
+        self._validate_available(next_batch_sizes)
+        return decision_diagnostics(self._engine, next_batch_sizes)
+
     def statistics(self) -> dict[str, dict[str, Any]]:
+        if self.is_ucb:
+            return self._engine.snapshot_statistics()
         result = {}
         for arm in self.arms:
             values = asdict(self._engine.statistics(arm.arm_id))
@@ -115,12 +133,16 @@ class BaselinePolicy:
         return result
 
     def _configuration(self) -> dict[str, Any]:
-        return {
+        result = {
             "scheduler_type": self.scheduler_type.value,
             "arms": [asdict(arm) for arm in self.arms],
             "total_candidate_budget": self.total_candidate_budget,
             "total_time_budget": self.total_time_budget,
         }
+
+        if self.is_ucb:
+            result.update(initial_targets=self.initial_targets, ucb_config=asdict(self.ucb_config))
+        return result
 
     def snapshot(self) -> dict[str, Any]:
         if self._pending is not None:
@@ -141,8 +163,22 @@ class BaselinePolicy:
             self.scheduler_type, self.arms,
             total_candidate_budget=self.total_candidate_budget,
             total_time_budget=self.total_time_budget,
+            initial_targets=self.initial_targets, ucb_config=self.ucb_config,
         )
         engine = deepcopy(snapshot["engine"])
+        if self.is_ucb:
+            fresh._engine.restore(engine)
+            counts = dict(snapshot["target_counts"])
+            if counts != {key: values["recovered"] for key, values in fresh.statistics().items()}:
+                raise ValueError("UCB target counts differ from engine")
+            for value in counts.values():
+                require_count(value, "recovered_targets")
+            ids = snapshot["recovered_target_ids"]
+            if (not isinstance(ids, list) or any(not isinstance(item, str) for item in ids)
+                    or len(set(ids)) != len(ids) or len(ids) > sum(counts.values())):
+                raise ValueError("invalid recovered target IDs")
+            self._engine, self._target_counts, self._recovered_ids = fresh._engine, counts, set(ids)
+            return
         expected_keys = set(self._by_id)
         if self.scheduler_type == SchedulerType.ROUND_ROBIN:
             expected_keys.add("__round_robin__")

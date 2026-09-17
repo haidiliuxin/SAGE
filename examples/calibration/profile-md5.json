@@ -1,0 +1,9 @@
+{
+  "algorithm": "md5",
+  "hash_mode": 0,
+  "target_count": 4,
+  "salts": {"mode": "unsalted", "group_sizes": [4]},
+  "device": "example-device",
+  "engine_version": "example-version",
+  "parameters": {}
+}

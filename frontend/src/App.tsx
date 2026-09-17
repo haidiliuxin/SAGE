@@ -1,6 +1,7 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError } from './api/client'
 import { parseContextLists } from './context-input'
+import { ResearchPanel, TaskRuns } from './ResearchPanel'
 import type {
   FileDetail,
   ExecutionMode,
@@ -180,7 +181,8 @@ function fileAccept(targetType: TargetType) {
 }
 
 function App() {
-  const [view, setView] = useState<View>('overview')
+  const [view, setView] = useState<View>(() => new URLSearchParams(window.location.hash.slice(1)).has('run') ? 'workspace' : 'overview')
+  const [researchRunId, setResearchRunId] = useState<string | null>(() => new URLSearchParams(window.location.hash.slice(1)).get('run'))
   const [mobileNav, setMobileNav] = useState(false)
   const [form, setForm] = useState<TaskInput>(blankInput)
   const [executionMode, setExecutionMode] = useState<ExecutionMode>('mock')
@@ -204,7 +206,24 @@ function App() {
   const [pauseRequestedTaskId, setPauseRequestedTaskId] = useState<string | null>(null)
   const runToken = useRef(0)
 
+  useEffect(() => {
+    const restoreRun = () => {
+      const runId = new URLSearchParams(window.location.hash.slice(1)).get('run')
+      setResearchRunId(runId)
+      if (runId) setView('workspace')
+    }
+    window.addEventListener('hashchange', restoreRun)
+    return () => window.removeEventListener('hashchange', restoreRun)
+  }, [])
+
+  const openResearchRun = (runId: string) => {
+    setResearchRunId(runId)
+    window.history.pushState(null, '', `#run=${encodeURIComponent(runId)}`)
+    setView('workspace')
+  }
+
   const progress = snapshot.status?.progress ?? (stage === 'completed' ? 1 : 0)
+  const showingHistory = researchRunId !== null && researchRunId !== snapshot.run?.run_id
   const completedStep = useMemo(() => stageOrder.indexOf(stage), [stage])
   const pausePending = Boolean(
     snapshot.task
@@ -363,6 +382,8 @@ function App() {
     event?.preventDefault()
     const token = ++runToken.current
     setError('')
+    setResearchRunId(null)
+    window.history.replaceState(null, '', window.location.pathname + window.location.search)
     setPauseRequestedTaskId(null)
     setSnapshot({ ...initialSnapshot, input: form })
     setView('workspace')
@@ -403,6 +424,8 @@ function App() {
       setStage('executing')
       const run = await api.execute(task.task_id, executionMode)
       if (token !== runToken.current) return
+      setResearchRunId(run.run_id)
+      window.history.replaceState(null, '', `#run=${encodeURIComponent(run.run_id)}`)
       setSnapshot((current) => ({
         ...current,
         run,
@@ -452,6 +475,8 @@ function App() {
     setSnapshot(initialSnapshot)
     setError('')
     setPauseRequestedTaskId(null)
+    setResearchRunId(null)
+    window.history.replaceState(null, '', window.location.pathname + window.location.search)
     setView('new')
   }
 
@@ -607,7 +632,7 @@ function App() {
             <div className="page-title workspace-title">
               <div><span className="section-kicker">COMMAND CENTER</span><h1>执行工作台</h1></div>
               <div className="workspace-actions">
-                {snapshot.task && snapshot.task.status === 'running' && (
+                {!showingHistory && snapshot.task && snapshot.task.status === 'running' && (
                   <button
                     className="button pause-button"
                     onClick={() => void pauseTask({ task_id: snapshot.task!.task_id, name: snapshot.input.name })}
@@ -616,7 +641,7 @@ function App() {
                     {statusChangingTaskId === snapshot.task.task_id ? '处理中…' : '批次后暂停'}
                   </button>
                 )}
-                {snapshot.task && snapshot.task.status === 'paused' && (
+                {!showingHistory && snapshot.task && snapshot.task.status === 'paused' && (
                   <button
                     className="button resume-button"
                     onClick={() => void resumeTask({ task_id: snapshot.task!.task_id, name: snapshot.input.name })}
@@ -625,7 +650,7 @@ function App() {
                     {statusChangingTaskId === snapshot.task.task_id ? '处理中…' : '继续'}
                   </button>
                 )}
-                {snapshot.task && !['completed', 'failed', 'cancelled'].includes(snapshot.task.status) && (
+                {!showingHistory && snapshot.task && !['completed', 'failed', 'cancelled'].includes(snapshot.task.status) && (
                   <button
                     className="button cancel-button"
                     onClick={() => void cancelTask({ task_id: snapshot.task!.task_id, name: snapshot.input.name })}
@@ -634,20 +659,21 @@ function App() {
                     {cancellingTaskId === snapshot.task.task_id ? '取消中…' : '取消任务'}
                   </button>
                 )}
-                <div className={`stage-badge ${pausePending ? 'pause-pending' : snapshot.task?.status === 'paused' ? 'paused' : stage}`}><i /> {pausePending ? '等待当前批次结束' : snapshot.task?.status === 'paused' ? '已暂停' : stageLabels[stage]}</div>
+                {!showingHistory && <div className={`stage-badge ${pausePending ? 'pause-pending' : snapshot.task?.status === 'paused' ? 'paused' : stage}`}><i /> {pausePending ? '等待当前批次结束' : snapshot.task?.status === 'paused' ? '已暂停' : stageLabels[stage]}</div>}
               </div>
             </div>
-            {pausePending && <div className="pause-notice"><strong>暂停请求已受理</strong><span>当前批次会继续执行，之后停止提交新批次</span></div>}
+            {!showingHistory && pausePending && <div className="pause-notice"><strong>暂停请求已受理</strong><span>当前批次会继续执行，之后停止提交新批次</span></div>}
             {taskActionError && <div className="error-banner"><strong>操作失败</strong><span>{taskActionError}</span><button onClick={() => setTaskActionError('')}>关闭</button></div>}
 
-            {stage === 'idle' ? (
+            {researchRunId && <ResearchPanel key={researchRunId} runId={researchRunId} />}
+            {stage === 'idle' || (researchRunId !== null && snapshot.run?.run_id !== researchRunId) ? (researchRunId ? null : (
               <div className="empty-state">
                 <span><Icon name="layers" size={30} /></span>
                 <h2>尚未创建评测任务</h2>
                 <p>从一份示例配置开始，几秒内查看完整的智能编排过程。</p>
                 <button className="button primary" onClick={() => setView('new')}>配置新任务 <Icon name="arrow" size={16} /></button>
               </div>
-            ) : (
+            )) : (
               <>
                 <div className="process-rail">
                   {workflow.map((item, index) => {
@@ -663,7 +689,7 @@ function App() {
                 <div className="metrics-grid">
                   <article><div><span>执行进度</span><Icon name="pulse" /></div><strong>{Math.round(progress * 100)}<small>%</small></strong><div className="metric-line"><i style={{ width: `${progress * 100}%` }} /></div></article>
                   <article><div><span>已测试候选</span><Icon name="target" /></div><strong>{formatNumber(snapshot.status?.tested ?? snapshot.result?.total_tested)}</strong><small>预算 {formatNumber(snapshot.input.candidate_budget)}</small></article>
-                  <article><div><span>恢复数量</span><Icon name="check" /></div><strong>{snapshot.status?.recovered ?? snapshot.result?.total_recovered ?? 0}</strong><small>Mock 评测结果</small></article>
+                  <article><div><span>恢复数量</span><Icon name="check" /></div><strong>{snapshot.status?.recovered ?? snapshot.result?.total_recovered ?? 0}</strong><small>执行反馈</small></article>
                   <article><div><span>执行耗时</span><Icon name="clock" /></div><strong>{snapshot.status?.elapsed_time ?? snapshot.result?.total_time ?? 0}<small>s</small></strong><small>预算 {snapshot.input.time_budget}s</small></article>
                 </div>
 
@@ -720,6 +746,7 @@ function App() {
                 <div><dt>更新时间</dt><dd>{formatDate(selectedTask.updated_at)}</dd></div>
               </dl>
               <div className="task-context"><strong>上下文信息</strong><p>{[...selectedTask.context.keywords, ...selectedTask.context.years.map(String), selectedTask.context.region, selectedTask.context.organization, selectedTask.context.description].filter(Boolean).join(' · ') || '未提供'}</p></div>
+              <TaskRuns key={selectedTask.task_id} taskId={selectedTask.task_id} onOpen={openResearchRun} />
               {selectedFile && <div className="file-detail"><div><span className="section-kicker">FILE DETAIL</span><strong>{selectedFile.filename}</strong></div><dl><div><dt>大小</dt><dd>{formatBytes(selectedFile.size)}</dd></div><div><dt>类型</dt><dd>{selectedFile.content_type ?? '未知'}</dd></div><div><dt>文件编号</dt><dd>{selectedFile.file_id}</dd></div><div><dt>SHA-256</dt><dd>{selectedFile.sha256}</dd></div></dl></div>}
             </article>}
           </section>

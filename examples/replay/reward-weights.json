@@ -1,0 +1,6 @@
+{
+  "recovery": 1.0,
+  "time": 0.1,
+  "candidates": 0.1,
+  "duplicates": 0.1
+}

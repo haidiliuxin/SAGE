@@ -21,6 +21,7 @@ from .repository import (
     TaskRepository,
 )
 from .run_control import RunControl
+from .research_api import router as research_router
 from .schemas import (
     ErrorResponse,
     ExecutionRequest,
@@ -51,6 +52,7 @@ from .service import (
 
 
 router = APIRouter(prefix="/api")
+router.include_router(research_router)
 LOGGER = logging.getLogger(__name__)
 SessionDependency = Annotated[Session, Depends(get_session)]
 

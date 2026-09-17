@@ -238,7 +238,7 @@ def test_invalid_scenario_parameters_fail_early(key, value):
 
 def test_unimplemented_algorithms_fail_explicitly():
     with pytest.raises(ValueError, match="milestone"):
-        ReplayEnvironment(scenario(), "ucb")
+        ReplayEnvironment(scenario(), "thompson")
 
 
 def test_bundled_fixture_compares_the_same_scenario():
