@@ -84,18 +84,20 @@ class HashcatJob:
     timeout_seconds: float = 60.0
     candidate_budget: int = 0
     session_dir: str | None = None
-    # 原生攻击：直接交给 hashcat 自己枚举，不经过 Python 候选列表。
-    # attack_mode 0 = 词表（可配 rules_path），3 = 掩码，6/7 = 混合攻击。
     attack_mode: int = 0
+    # 外部词表（服务器端字典/上传的词表）：由 hashcat 直接按需读取整本字典，
+    # 不经过 Python 候选列表，因此不受候选条数上限约束。
     wordlist_path: Path | None = None
-    rules_path: Path | None = None
-    mask: str | None = None
-    # 原生攻击无法预先知道候选规模，用该值作为进度换算与预算上限的估计。
     candidate_estimate: int | None = None
+    rule_files: tuple[str, ...] = ()
+    inline_rules: tuple[str, ...] = ()
+    masks: tuple[str, ...] = ()
+    custom_charsets: tuple[str, ...] = ()
 
     @property
     def is_native(self) -> bool:
-        return self.wordlist_path is not None or self.mask is not None
+        """外部词表攻击：候选由 hashcat 自己读盘，不经过 Python 候选列表。"""
+        return self.wordlist_path is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,94 +129,102 @@ class HashcatHandle:
     def __init__(self, command: Sequence[str], job: HashcatJob) -> None:
         # 校验必须先于任何资源创建，避免异常路径遗留临时目录。
         targets = _validated_lines(job.target_hashes, "target_hashes")
+        candidates = _validated_lines(
+            job.candidates[: job.candidate_budget], "candidates"
+        )
+        masks = _validated_lines(job.masks, "masks")
+        rule_files = _validated_lines(job.rule_files, "rule_files")
+        inline_rules = _validated_lines(job.inline_rules, "inline_rules")
+        custom_charsets = _validated_lines(job.custom_charsets, "custom_charsets")
+        _validate_attack_contract(job, candidates, masks, rule_files, inline_rules)
         if not targets:
             raise AppError(
                 "EXECUTION_FAILED", "Hashcat 目标为空", status_code=422, details={}
             )
-        native = job.is_native
-        candidates: tuple[str, ...] = ()
-        # hashcat 的位置参数顺序固定为「目标文件 词表/掩码」，因此把词表与掩码
-        # 单独收集，最后拼接在目标文件之后。
-        attack_options: list[str] = ["--attack-mode", str(job.attack_mode)]
-        attack_positional: list[str] = []
-        if native:
-            if job.wordlist_path is None and job.mask is None:
+        external_wordlist: Path | None = None
+        if job.wordlist_path is not None:
+            external_wordlist = Path(job.wordlist_path).expanduser()
+            if not external_wordlist.is_file():
                 raise AppError(
                     "EXECUTION_FAILED",
-                    "原生攻击缺少词表或掩码",
+                    "词表文件不存在，请检查 SAGE_WORDLIST_PATH",
                     status_code=422,
-                    details={},
+                    details={"wordlist": str(external_wordlist)},
                 )
-            if job.wordlist_path is not None:
-                wordlist = Path(job.wordlist_path).expanduser()
-                if not wordlist.is_file():
-                    raise AppError(
-                        "EXECUTION_FAILED",
-                        "词表文件不存在，请检查 SAGE_WORDLIST_PATH",
-                        status_code=422,
-                        details={"wordlist": str(wordlist)},
-                    )
-                attack_positional.append(str(wordlist))
-            if job.rules_path is not None:
-                rules = Path(job.rules_path).expanduser()
-                if not rules.is_file():
-                    raise AppError(
-                        "EXECUTION_FAILED",
-                        "hashcat 规则文件不存在",
-                        status_code=422,
-                        details={"rules": str(rules)},
-                    )
-                attack_options.extend(["--rules-file", str(rules)])
-            if job.mask is not None:
-                attack_positional.append(job.mask)
-        else:
-            candidates = _validated_lines(
-                job.candidates[: job.candidate_budget], "candidates"
+        if not candidates and job.attack_mode != 3 and external_wordlist is None:
+            raise AppError(
+                "EXECUTION_FAILED", "真实执行候选集为空", status_code=422, details={}
             )
-            if not candidates:
-                raise AppError(
-                    "EXECUTION_FAILED", "真实执行候选集为空", status_code=422, details={}
-                )
+        if job.attack_mode == 3 and not masks:
+            raise AppError(
+                "EXECUTION_FAILED", "Hashcat 掩码攻击缺少 mask", status_code=422, details={}
+            )
         self.job = job
-        self.native = native
         self.candidate_count = (
             int(job.candidate_estimate or job.candidate_budget or 1)
-            if native
-            else len(candidates)
+            if external_wordlist is not None
+            else len(candidates) if candidates else len(masks)
         )
+        self.native = external_wordlist is not None
         self._lock = threading.RLock()
         self._started = time.monotonic()
         self._stop_reason: str | None = None
         self._result: HashcatResult | None = None
-        # 原生攻击（整本字典/掩码）没有"批次级续跑"语义，固定使用临时目录。
-        session_dir = None if native else job.session_dir
         self._temp_dir = (
             None
-            if session_dir is not None
+            if job.session_dir is not None
             else tempfile.TemporaryDirectory(prefix="sage-hashcat-")
         )
         working_dir = (
-            Path(session_dir)
-            if session_dir is not None
+            Path(job.session_dir)
+            if job.session_dir is not None
             else Path(self._temp_dir.name)
         )
         working_dir.mkdir(parents=True, exist_ok=True)
         self._target_path = working_dir / "target.hash"
-        self._wordlist_path = working_dir / "candidates.txt"
+        self._wordlist_path = (
+            external_wordlist
+            if external_wordlist is not None
+            else working_dir / "candidates.txt"
+        )
         self._outfile_path = working_dir / "recovered.txt"
         self._stdout_path = working_dir / "stdout.log"
         self._stderr_path = working_dir / "stderr.log"
         self._restore_path = working_dir / "session.restore"
         self._metadata_path = working_dir / "session.json"
-        resuming = self._restore_path.is_file()
+        self._mask_path = working_dir / "masks.hcmask"
+        self._inline_rule_path = working_dir / "inline.rule"
+        resuming = self._restore_path.is_file() and not job.is_native
         if resuming:
-            self._validate_resume_metadata(targets, candidates)
+            self._validate_resume_metadata(
+                targets,
+                candidates,
+                masks,
+                rule_files,
+                inline_rules,
+                custom_charsets,
+            )
         else:
             self._target_path.write_text("\n".join(targets) + "\n", encoding="utf-8")
-            self._wordlist_path.write_text("\n".join(candidates) + "\n", encoding="utf-8")
+            if candidates and external_wordlist is None:
+                self._wordlist_path.write_text(
+                    "\n".join(candidates) + "\n", encoding="utf-8"
+                )
+            if len(masks) > 1:
+                self._mask_path.write_text(
+                    "\n".join(masks) + "\n", encoding="utf-8"
+                )
+            if inline_rules:
+                self._inline_rule_path.write_text(
+                    "\n".join(inline_rules) + "\n", encoding="utf-8"
+                )
             self._write_session_metadata(
                 targets,
                 candidates,
+                masks,
+                rule_files,
+                inline_rules,
+                custom_charsets,
                 lifecycle="prepared",
                 restore_used=False,
             )
@@ -228,13 +238,12 @@ class HashcatHandle:
             "--restore-file-path",
             str(self._restore_path),
         ]
-        if native:
-            # 原生攻击：不经过候选文件，也不使用批次级 restore。
-            args = [
+        args = [*common, "--restore"] if resuming else [
                 *common,
                 "--hash-type",
                 str(job.hash_mode),
-                *attack_options,
+                "--attack-mode",
+                str(job.attack_mode),
                 "--runtime",
                 str(max(1, math.ceil(job.timeout_seconds))),
                 "--status",
@@ -242,45 +251,22 @@ class HashcatHandle:
                 "--status-timer",
                 "1",
                 "--potfile-disable",
-                "--restore-disable",
                 "--outfile",
                 str(self._outfile_path),
                 "--outfile-format",
                 "1,2",
                 "--separator",
                 "\t",
+                *_custom_charset_args(custom_charsets),
+                *_rule_args(rule_files, self._inline_rule_path if inline_rules else None),
                 str(self._target_path),
-                *attack_positional,
+                *_attack_position_args(
+                    job.attack_mode,
+                    wordlist_path=self._wordlist_path,
+                    mask_path=self._mask_path,
+                    masks=masks,
+                ),
             ]
-        else:
-            args = (
-                [*common, "--restore"]
-                if resuming
-                else [
-                    *common,
-                    "--hash-type",
-                    str(job.hash_mode),
-                    "--attack-mode",
-                    "0",
-                    "--runtime",
-                    str(max(1, math.ceil(job.timeout_seconds))),
-                    "--status",
-                    "--status-json",
-                    "--status-timer",
-                    "1",
-                    "--potfile-disable",
-                    "--restore-timer",
-                    "1",
-                    "--outfile",
-                    str(self._outfile_path),
-                    "--outfile-format",
-                    "1,2",
-                    "--separator",
-                    "\t",
-                    str(self._target_path),
-                    str(self._wordlist_path),
-                ]
-            )
         try:
             # hashcat 的 OpenCL 内核目录按进程工作目录解析（./OpenCL/），
             # 因此当命令指向真实可执行文件时，须以其所在目录作为 cwd。
@@ -288,6 +274,10 @@ class HashcatHandle:
             self._write_session_metadata(
                 targets,
                 candidates,
+                masks,
+                rule_files,
+                inline_rules,
+                custom_charsets,
                 lifecycle="running",
                 restore_used=resuming,
             )
@@ -384,13 +374,9 @@ class HashcatHandle:
         recovered = _parse_outfile(self._outfile_path)
         tested = _parse_progress(stdout)
         if tested is None:
-            tested = (
-                len(recovered)
-                if self.native
-                else (self.candidate_count if exit_code == 1 else len(recovered))
-            )
+            tested = self.candidate_count if exit_code == 1 else len(recovered)
         tested = max(tested, len(recovered))
-        if not self.native:
+        if not getattr(self, "native", False):
             tested = min(tested, self.candidate_count)
 
         if self._stop_reason == "cancelled":
@@ -423,6 +409,10 @@ class HashcatHandle:
                     self.job.candidates[: self.job.candidate_budget],
                     "candidates",
                 ),
+                _validated_lines(self.job.masks, "masks"),
+                _validated_lines(self.job.rule_files, "rule_files"),
+                _validated_lines(self.job.inline_rules, "inline_rules"),
+                _validated_lines(self.job.custom_charsets, "custom_charsets"),
                 lifecycle="finished",
                 restore_used=_metadata_restore_used(self._metadata_path),
                 result=self._result,
@@ -435,6 +425,10 @@ class HashcatHandle:
         self,
         targets: tuple[str, ...],
         candidates: tuple[str, ...],
+        masks: tuple[str, ...],
+        rule_files: tuple[str, ...],
+        inline_rules: tuple[str, ...],
+        custom_charsets: tuple[str, ...],
     ) -> None:
         if not self._metadata_path.is_file():
             raise AppError(
@@ -452,7 +446,15 @@ class HashcatHandle:
                 status_code=409,
                 details={"reason": str(exc)},
             ) from exc
-        expected = _session_fingerprint(self.job, targets, candidates)
+        expected = _session_fingerprint(
+            self.job,
+            targets,
+            candidates,
+            masks,
+            rule_files,
+            inline_rules,
+            custom_charsets,
+        )
         if metadata.get("fingerprint") != expected:
             raise AppError(
                 "EXECUTION_FAILED",
@@ -460,7 +462,14 @@ class HashcatHandle:
                 status_code=409,
                 details={"session_dir": str(self._metadata_path.parent)},
             )
-        if not self._target_path.is_file() or not self._wordlist_path.is_file():
+        if not self._target_path.is_file():
+            raise AppError(
+                "EXECUTION_FAILED",
+                "Hashcat 会话文件不完整，无法恢复",
+                status_code=409,
+                details={"session_dir": str(self._metadata_path.parent)},
+            )
+        if candidates and not self._wordlist_path.is_file():
             raise AppError(
                 "EXECUTION_FAILED",
                 "Hashcat 会话文件不完整，无法恢复",
@@ -472,6 +481,10 @@ class HashcatHandle:
         self,
         targets: tuple[str, ...],
         candidates: tuple[str, ...],
+        masks: tuple[str, ...],
+        rule_files: tuple[str, ...],
+        inline_rules: tuple[str, ...],
+        custom_charsets: tuple[str, ...],
         *,
         lifecycle: str,
         restore_used: bool,
@@ -481,15 +494,28 @@ class HashcatHandle:
             "schema_version": 1,
             "run_id": self.job.run_id,
             "hash_mode": self.job.hash_mode,
+            "attack_mode": self.job.attack_mode,
             "candidate_count": len(candidates),
             "candidate_budget": self.job.candidate_budget,
+            "mask_count": len(masks),
+            "rule_file_count": len(rule_files),
+            "inline_rule_count": len(inline_rules),
             "timeout_seconds": self.job.timeout_seconds,
-            "fingerprint": _session_fingerprint(self.job, targets, candidates),
+            "fingerprint": _session_fingerprint(
+                self.job,
+                targets,
+                candidates,
+                masks,
+                rule_files,
+                inline_rules,
+                custom_charsets,
+            ),
             "lifecycle": lifecycle,
             "restore_used": restore_used,
             "restore_exists": self._restore_path.is_file(),
             "target_file": str(self._target_path),
             "wordlist_file": str(self._wordlist_path),
+            "mask_file": str(self._mask_path) if masks else None,
             "outfile": str(self._outfile_path),
         }
         if result is not None:
@@ -516,17 +542,14 @@ class HashcatAdapter:
             raise ValueError("Hashcat command cannot be empty")
 
     def start(self, job: HashcatJob) -> HashcatHandle:
-        if job.timeout_seconds <= 0:
+        if job.timeout_seconds <= 0 or (
+            job.candidate_budget <= 0
+            and not job.is_native
+            and not job.masks
+        ):
             raise AppError(
                 "BUDGET_EXCEEDED",
-                "时间预算必须大于 0",
-                status_code=422,
-                details={},
-            )
-        if not job.is_native and job.candidate_budget <= 0:
-            raise AppError(
-                "BUDGET_EXCEEDED",
-                "候选预算必须大于 0",
+                "时间预算和候选预算必须大于 0",
                 status_code=422,
                 details={},
             )
@@ -576,17 +599,102 @@ def _validated_lines(values: Sequence[str], field: str) -> tuple[str, ...]:
     return tuple(values)
 
 
+def _validate_attack_contract(
+    job: HashcatJob,
+    candidates: Sequence[str],
+    masks: Sequence[str],
+    rule_files: Sequence[str],
+    inline_rules: Sequence[str],
+) -> None:
+    if job.attack_mode not in {0, 3, 6, 7}:
+        raise AppError(
+            "EXECUTION_FAILED",
+            "暂仅支持 Hashcat 词表、掩码与混合攻击模式",
+            status_code=422,
+            details={"attack_mode": job.attack_mode},
+        )
+    if (rule_files or inline_rules) and job.attack_mode != 0:
+        raise AppError(
+            "EXECUTION_FAILED",
+            "Hashcat 规则文件仅支持词表攻击模式",
+            status_code=422,
+            details={"attack_mode": job.attack_mode},
+        )
+    if job.attack_mode in {3, 6, 7} and not masks:
+        raise AppError(
+            "EXECUTION_FAILED",
+            "Hashcat 掩码/混合攻击缺少 mask",
+            status_code=422,
+            details={"attack_mode": job.attack_mode},
+        )
+    if job.attack_mode in {6, 7} and not candidates and not job.is_native:
+        raise AppError(
+            "EXECUTION_FAILED",
+            "Hashcat 混合攻击缺少词表种子",
+            status_code=422,
+            details={"attack_mode": job.attack_mode},
+        )
+
+
+def _custom_charset_args(custom_charsets: Sequence[str]) -> list[str]:
+    args: list[str] = []
+    for index, value in enumerate(custom_charsets[:4], start=1):
+        args.extend((f"-{index}", value))
+    return args
+
+
+def _rule_args(
+    rule_files: Sequence[str],
+    inline_rule_path: Path | None,
+) -> list[str]:
+    args: list[str] = []
+    for path in rule_files:
+        args.extend(("-r", path))
+    if inline_rule_path is not None:
+        args.extend(("-r", str(inline_rule_path)))
+    return args
+
+
+def _attack_position_args(
+    attack_mode: int,
+    *,
+    wordlist_path: Path,
+    mask_path: Path,
+    masks: Sequence[str],
+) -> list[str]:
+    mask_arg = str(mask_path) if len(masks) > 1 else masks[0] if masks else ""
+    if attack_mode == 0:
+        return [str(wordlist_path)]
+    if attack_mode == 3:
+        return [mask_arg]
+    if attack_mode == 6:
+        return [str(wordlist_path), mask_arg]
+    if attack_mode == 7:
+        return [mask_arg, str(wordlist_path)]
+    raise ValueError(f"unsupported hashcat attack mode: {attack_mode}")
+
+
 def _session_fingerprint(
     job: HashcatJob,
     targets: Sequence[str],
     candidates: Sequence[str],
+    masks: Sequence[str],
+    rule_files: Sequence[str],
+    inline_rules: Sequence[str],
+    custom_charsets: Sequence[str],
 ) -> dict[str, object]:
     return {
         "hash_mode": job.hash_mode,
+        "attack_mode": job.attack_mode,
         "targets_sha256": _lines_digest(targets),
         "candidates_sha256": _lines_digest(candidates),
+        "masks_sha256": _lines_digest(masks),
+        "rule_files_sha256": _lines_digest(rule_files),
+        "inline_rules_sha256": _lines_digest(inline_rules),
+        "custom_charsets_sha256": _lines_digest(custom_charsets),
         "target_count": len(targets),
         "candidate_count": len(candidates),
+        "mask_count": len(masks),
     }
 
 

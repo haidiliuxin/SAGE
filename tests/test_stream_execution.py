@@ -9,6 +9,7 @@ from sage_pass.candidate_generator import CandidateGenerator
 from sage_pass.enums import PlannerType, StrategyId, TaskStatus
 from sage_pass.errors import AppError
 from sage_pass.hashcat_adapter import HashcatAdapter, HashcatJob
+from sage_pass.real_executor import _hashcat_job_for_strategy
 from sage_pass.schemas import StrategyItem, StrategyPlan
 
 
@@ -87,7 +88,8 @@ def test_hashcat_session_uses_persistent_restore_metadata(tmp_path):
     assert result.status == TaskStatus.COMPLETED
     assert "--session" in argv
     assert "--restore-file-path" in argv
-    assert "--restore-timer" in argv
+    # hashcat 7.1.2 没有 --restore-timer（真实工具会报 unknown option），恢复文件默认自动写入。
+    assert "--restore-timer" not in argv
     assert "--restore-disable" not in argv
     assert (session_dir / "candidates.txt").read_text(encoding="utf-8") == "alpha\nbeta\n"
 
@@ -154,3 +156,36 @@ def test_hashcat_restore_rejects_mismatched_candidate_file(tmp_path):
             candidate_budget=1,
             session_dir=str(session_dir),
         ))
+
+
+def test_executor_maps_strategy_parameters_to_native_hashcat_attack():
+    mask_job = _hashcat_job_for_strategy(
+        run_id="R-mask",
+        target_hashes=(TARGET,),
+        hash_mode=0,
+        candidates=("?l?l?d?d",),
+        timeout_seconds=10,
+        candidate_budget=1,
+        parameters={"hashcat_masks": ["?l?l?d?d"]},
+        session_dir=None,
+    )
+    assert mask_job.attack_mode == 3
+    assert mask_job.candidates == ()
+    assert mask_job.masks == ("?l?l?d?d",)
+
+    hybrid_job = _hashcat_job_for_strategy(
+        run_id="R-hybrid",
+        target_hashes=(TARGET,),
+        hash_mode=0,
+        candidates=("seed",),
+        timeout_seconds=10,
+        candidate_budget=1,
+        parameters={
+            "hashcat_hybrid_mask": "?d?d",
+            "hashcat_hybrid_position": "right",
+        },
+        session_dir=None,
+    )
+    assert hybrid_job.attack_mode == 6
+    assert hybrid_job.candidates == ("seed",)
+    assert hybrid_job.masks == ("?d?d",)
