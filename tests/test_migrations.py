@@ -20,7 +20,10 @@ def _table_sql(engine, name: str) -> str:
 def test_fresh_database_records_and_applies_migrations(tmp_path):
     db = Database(f"sqlite:///{(tmp_path / 'm1.db').as_posix()}")
     db.create_all()
-    assert applied_versions(db.engine) == ["0001_strategy_runs_run_id"]
+    assert applied_versions(db.engine) == [
+        "0001_strategy_runs_run_id",
+        "0002_task_wordlist_file",
+    ]
     # run_id 现在是普通索引而非唯一约束
     assert "UNIQUE" not in _table_sql(db.engine, "strategy_runs").upper()
     db.dispose()
@@ -30,7 +33,10 @@ def test_migrations_are_idempotent(tmp_path):
     db = Database(f"sqlite:///{(tmp_path / 'm2.db').as_posix()}")
     db.create_all()
     assert run_migrations(db.engine) == []
-    assert applied_versions(db.engine) == ["0001_strategy_runs_run_id"]
+    assert applied_versions(db.engine) == [
+        "0001_strategy_runs_run_id",
+        "0002_task_wordlist_file",
+    ]
     db.dispose()
 
 
@@ -67,7 +73,10 @@ def test_migration_upgrades_legacy_unique_run_id_table(tmp_path):
         )
 
     db.create_all()  # 应升级旧表且保留数据
-    assert applied_versions(db.engine) == ["0001_strategy_runs_run_id"]
+    assert applied_versions(db.engine) == [
+        "0001_strategy_runs_run_id",
+        "0002_task_wordlist_file",
+    ]
     with db.engine.connect() as connection:
         rows = connection.exec_driver_sql(
             "SELECT run_id, tested FROM strategy_runs"

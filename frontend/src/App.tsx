@@ -43,6 +43,7 @@ const blankInput: TaskInput = {
     authorized_keywords: [],
   },
   historical_passwords: [],
+  wordlist_file_id: null,
 }
 
 const initialSnapshot: FlowSnapshot = {
@@ -214,6 +215,7 @@ function App() {
   const [historicalPasswordText, setHistoricalPasswordText] = useState('')
   const [candidateText, setCandidateText] = useState('')
   const [stopOnHit, setStopOnHit] = useState(false)
+  const [wordlistFile, setWordlistFile] = useState<File | null>(null)
   const [file, setFile] = useState<File | null>(null)
   const [stage, setStage] = useState<FlowStage>('idle')
   const [snapshot, setSnapshot] = useState<FlowSnapshot>(initialSnapshot)
@@ -434,6 +436,12 @@ function App() {
         interest_words: parseTermList(interestText),
       }
       prepared.historical_passwords = parseHistoricalPasswords(historicalPasswordText)
+      if (wordlistFile) {
+        // 上传的字典由后端直接交给 hashcat 原生读取，不受前端 10 万条候选上限约束。
+        setStage('uploading')
+        const uploadedWordlist = await api.uploadFile(wordlistFile)
+        prepared = { ...prepared, wordlist_file_id: uploadedWordlist.file_id }
+      }
       if (prepared.target.type !== 'hash') {
         if (!file) throw new Error('请选择一个经过授权的离线评测文件。')
         setStage('uploading')
@@ -655,7 +663,7 @@ function App() {
                   <label className="wide checkbox-row"><input type="checkbox" checked={stopOnHit} onChange={(e) => setStopOnHit(e.target.checked)} /><span>命中即停（恢复目标后立即结束，不再消耗剩余候选）</span></label>
                 </div>
                 <label className="wide"><span>补充候选词表 <em>每行一个，最多 10 万条</em></span><textarea rows={3} value={candidateText} onChange={(e) => setCandidateText(e.target.value)} placeholder="粘贴字典或常见口令；也可用下方按钮导入 .txt 词表文件" /></label>
-                <label className="upload-box wordlist-box"><input type="file" accept=".txt,.dic,.lst" onChange={async (e) => { const picked = e.target.files?.[0]; if (picked) setCandidateText(await picked.text()) }} /><span className="upload-icon"><Icon name="upload" /></span><strong>导入词表文件（.txt / .dic / .lst）</strong><small>在浏览器端读取，作为高优先级候选提交给后端；超大字典请放到服务器并配置 SAGE_WORDLIST_PATH</small></label>
+                <label className="upload-box wordlist-box"><input type="file" accept=".txt,.dic,.lst,.dict" onChange={(e) => setWordlistFile(e.target.files?.[0] ?? null)} /><span className="upload-icon"><Icon name="upload" /></span><strong>{wordlistFile ? wordlistFile.name : '上传词表文件（真实字典）'}</strong><small>{wordlistFile ? `${(wordlistFile.size / 1024 / 1024).toFixed(2)} MB · 由后端交给 hashcat 原生读取，无条数上限` : '.txt / .dic / .lst / .dict；适合大字典，由 hashcat 单进程按需读取'}</small></label>
               </div>
 
               <div className="form-section">

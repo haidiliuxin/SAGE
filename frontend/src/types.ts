@@ -76,6 +76,7 @@ export interface TaskInput {
   candidate_budget: number
   context: TaskContext
   historical_passwords: string[]
+  wordlist_file_id: string | null
 }
 
 export interface TaskCreated {

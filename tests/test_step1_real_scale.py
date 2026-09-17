@@ -92,6 +92,71 @@ def test_native_wordlist_attack_reads_dictionary_directly(client, tmp_path, monk
     assert not any("candidates.txt" in " ".join(entry["argv"]) for entry in native_entries)
 
 
+def test_uploaded_wordlist_file_drives_native_attack(client, tmp_path, monkeypatch):
+    """上传的词表文件直接交给 hashcat 原生读取（无 10 万条上限）。"""
+    log_path = tmp_path / "hashcat-uploaded.log"
+    _install_fakes(client, tmp_path, monkeypatch, FAKE_HASHCAT_LOG=str(log_path))
+    upload = client.post(
+        "/api/files",
+        files={"file": ("company.dict", b"hunter2\nletmein\nP@ssw0rd2024\n", "text/plain")},
+    )
+    assert upload.status_code == 201, upload.text
+    wordlist_file_id = upload.json()["file_id"]
+
+    created = client.post(
+        "/api/tasks",
+        json={
+            "name": "上传词表任务",
+            "target": {"type": "hash", "content": MD5_HEX, "file_id": None},
+            "known_algorithm": "md5",
+            "time_budget": 60,
+            "candidate_budget": 5000,
+            "context": {},
+            "wordlist_file_id": wordlist_file_id,
+        },
+    )
+    assert created.status_code == 201, created.text
+    task_id = created.json()["task_id"]
+    assert client.get(f"/api/tasks/{task_id}").json()["wordlist_file_id"] == wordlist_file_id
+    assert client.post(f"/api/tasks/{task_id}/analyze").status_code == 200
+    assert client.post(f"/api/tasks/{task_id}/plan").status_code == 200
+    started = client.post(f"/api/tasks/{task_id}/execute", json={"mode": "real"})
+    assert started.status_code == 200, started.text
+    run_id = started.json()["run_id"]
+    _wait_terminal(client, run_id)
+    result = client.get(f"/api/runs/{run_id}/result").json()
+
+    assert result["status"] == "completed"
+    assert [item["plaintext"] for item in result["recovered_items"]] == ["hunter2"]
+    entries = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert entries and entries[0]["attack_mode"] == "0"
+    # hashcat 收到的是上传文件的落盘路径（按需流式读取），而不是 Python 生成的候选文件。
+    assert entries[0]["argv"][-1].endswith(".dict"), entries[0]["argv"]
+
+
+def test_wordlist_file_must_be_a_text_dictionary(client, tmp_path, monkeypatch):
+    _install_fakes(client, tmp_path, monkeypatch)
+    upload = client.post(
+        "/api/files",
+        files={"file": ("archive.zip", b"PK\x03\x04fake", "application/zip")},
+    )
+    assert upload.status_code == 201
+    rejected = client.post(
+        "/api/tasks",
+        json={
+            "name": "错误词表",
+            "target": {"type": "hash", "content": MD5_HEX, "file_id": None},
+            "known_algorithm": "md5",
+            "time_budget": 60,
+            "candidate_budget": 100,
+            "context": {},
+            "wordlist_file_id": upload.json()["file_id"],
+        },
+    )
+    assert rejected.status_code == 422, rejected.text
+    assert "纯文本字典" in rejected.text
+
+
 def test_stop_on_hit_ends_run_after_first_recovery(client, tmp_path, monkeypatch):
     log_path = tmp_path / "hashcat-stophit.log"
     _install_fakes(client, tmp_path, monkeypatch, FAKE_HASHCAT_LOG=str(log_path))

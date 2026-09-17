@@ -323,7 +323,7 @@ class RealExecutor:
         started_at = now_iso()
         run_id = public_id("R")
         batches_by_strategy: dict[str, list[CandidateBatch]] = {}
-        native_wordlist = self._native_wordlist_path()
+        native_wordlist = self._native_wordlist_path(session, task)
         prir_model = PRIRRepository(session).get(task.task_id)
         transfer_patterns, knowledge_summary = load_transfer_knowledge(
             PatternKnowledgeRepository(session),
@@ -649,8 +649,32 @@ class RealExecutor:
             zip_timeout=ZIP_EXTRACTION_TIMEOUT,
         )
 
-    def _native_wordlist_path(self) -> Path | None:
-        """配置了 SAGE_WORDLIST_PATH 时，S1 走 hashcat 原生词表攻击（单进程读整本字典）。"""
+    def _native_wordlist_path(
+        self, session: Session, task: TaskDetail
+    ) -> Path | None:
+        """S1 的原生词表攻击来源：任务上传的词表优先，其次 SAGE_WORDLIST_PATH。
+
+        两种情况都把文件路径直接交给 hashcat（`--attack-mode 0 <target> <wordlist>`），
+        因此字典由 hashcat 按需流式读取，不进入 Python 候选列表。
+        """
+        if task.wordlist_file_id:
+            item = FileRepository(session).get(task.wordlist_file_id)
+            if item is None:
+                raise AppError(
+                    "EXECUTION_FAILED",
+                    "任务引用的词表文件记录不存在",
+                    status_code=422,
+                    details={"field": "wordlist_file_id"},
+                )
+            path = self.settings.upload_dir / item.stored_name
+            if not path.is_file():
+                raise AppError(
+                    "EXECUTION_FAILED",
+                    "任务引用的词表文件已丢失",
+                    status_code=422,
+                    details={"wordlist": item.stored_name},
+                )
+            return path
         configured = self.settings.wordlist_path
         if configured is None:
             return None

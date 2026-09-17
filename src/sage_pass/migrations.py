@@ -107,11 +107,34 @@ def _migrate_strategy_runs_run_id(engine: Engine) -> None:
         )
 
 
+def _has_column(connection: Connection, table: str, column: str) -> bool:
+    rows = connection.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
+    return any(row[1] == column for row in rows)
+
+
+def _migrate_task_wordlist_file(engine: Engine) -> None:
+    """0002：tasks 增加 wordlist_file_id（上传的词表文件，供原生 hashcat 攻击读取）。"""
+    if engine.dialect.name != "sqlite":
+        return
+    with engine.begin() as connection:
+        if _has_column(connection, "tasks", "wordlist_file_id"):
+            return
+        connection.exec_driver_sql(
+            "ALTER TABLE tasks ADD COLUMN wordlist_file_id VARCHAR(32) "
+            "REFERENCES files (file_id)"
+        )
+
+
 MIGRATIONS: Sequence[Migration] = (
     Migration(
         version="0001_strategy_runs_run_id",
         description="strategy_runs.run_id 唯一约束 -> 普通索引（多策略同一 run）",
         apply=_migrate_strategy_runs_run_id,
+    ),
+    Migration(
+        version="0002_task_wordlist_file",
+        description="tasks.wordlist_file_id：上传词表文件（真实字典）",
+        apply=_migrate_task_wordlist_file,
     ),
 )
 

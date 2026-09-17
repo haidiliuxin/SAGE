@@ -20,6 +20,9 @@ class TaskModel(Base):
         String(32), ForeignKey("files.file_id"), nullable=True
     )
     known_algorithm: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    wordlist_file_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("files.file_id"), nullable=True
+    )
     time_budget: Mapped[int] = mapped_column(Integer)
     candidate_budget: Mapped[int] = mapped_column(Integer)
     context: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -33,7 +36,9 @@ class TaskModel(Base):
     strategy_runs: Mapped[list["StrategyRunModel"]] = relationship(
         back_populates="task", cascade="all, delete-orphan"
     )
-    file: Mapped["FileModel | None"] = relationship(back_populates="tasks")
+    file: Mapped["FileModel | None"] = relationship(
+        back_populates="tasks", foreign_keys="TaskModel.file_id"
+    )
 
 
 class PRIRModel(Base):
@@ -95,7 +100,9 @@ class FileModel(Base):
     sha256: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[str] = mapped_column(String(40))
 
-    tasks: Mapped[list[TaskModel]] = relationship(back_populates="file")
+    tasks: Mapped[list[TaskModel]] = relationship(
+        back_populates="file", foreign_keys="TaskModel.file_id"
+    )
 
 
 class RunRecordModel(Base):

@@ -121,6 +121,8 @@ class TaskCreate(BaseModel):
     candidate_budget: int = Field(gt=0)
     context: TaskContext = Field(default_factory=TaskContext)
     historical_passwords: list[str] = Field(default_factory=list, max_length=1000)
+    # 上传的词表文件（真实字典）：执行时交给 hashcat 原生读取，不经过候选列表。
+    wordlist_file_id: str | None = Field(default=None, max_length=32)
 
     @field_validator("historical_passwords")
     @classmethod
@@ -156,6 +158,7 @@ class TaskDetail(TaskCreated):
     name: str
     target: TargetInput
     known_algorithm: str | None
+    wordlist_file_id: str | None = None
     time_budget: int
     candidate_budget: int
     context: TaskContext

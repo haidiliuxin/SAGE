@@ -20,6 +20,8 @@ from .schemas import FileCreated, TargetInput, TaskCreate, TaskDetail
 
 SHANGHAI = timezone(timedelta(hours=8), name="Asia/Shanghai")
 _HISTORICAL_PASSWORDS_KEY = "_historical_passwords"
+# 允许作为词表上传的纯文本字典扩展名。
+WORDSLIST_SUFFIXES = (".txt", ".dic", ".lst", ".dict", ".wordlist")
 
 
 def now_iso() -> str:
@@ -64,6 +66,7 @@ def task_to_schema(task: TaskModel) -> TaskDetail:
             file_id=task.file_id,
         ),
         known_algorithm=task.known_algorithm,
+        wordlist_file_id=task.wordlist_file_id,
         time_budget=task.time_budget,
         candidate_budget=task.candidate_budget,
         context=stored_context,
@@ -87,6 +90,30 @@ def create_task(session: Session, payload: TaskCreate) -> TaskModel:
                 status_code=422,
                 details={"field": "target.file_id"},
             )
+    if payload.wordlist_file_id:
+        if payload.wordlist_file_id == payload.target.file_id:
+            raise AppError(
+                "INVALID_TASK",
+                "词表文件不能与目标文件是同一个文件",
+                status_code=422,
+                details={"field": "wordlist_file_id"},
+            )
+        wordlist_item = FileRepository(session).get(payload.wordlist_file_id)
+        if wordlist_item is None:
+            raise AppError(
+                "INVALID_TASK",
+                "词表文件不存在",
+                status_code=422,
+                details={"field": "wordlist_file_id"},
+            )
+        suffix = Path(wordlist_item.stored_name).suffix.lower()
+        if suffix not in WORDSLIST_SUFFIXES:
+            raise AppError(
+                "INVALID_TASK",
+                "词表文件必须是纯文本字典（.txt/.dic/.lst/.dict/.wordlist）",
+                status_code=422,
+                details={"field": "wordlist_file_id", "suffix": suffix},
+            )
     timestamp = now_iso()
     stored_context = payload.context.model_dump()
     if payload.historical_passwords:
@@ -100,6 +127,7 @@ def create_task(session: Session, payload: TaskCreate) -> TaskModel:
         target_content=payload.target.content,
         file_id=payload.target.file_id,
         known_algorithm=payload.known_algorithm,
+        wordlist_file_id=payload.wordlist_file_id,
         time_budget=payload.time_budget,
         candidate_budget=payload.candidate_budget,
         context=stored_context,
