@@ -14,6 +14,7 @@ import sys
 import time
 from pathlib import Path
 
+from sage_pass.candidate_generator import CandidateGenerator
 from sage_pass.hashcat_adapter import HashcatAdapter
 from sage_pass.zip_adapter import ZipHashExtractor
 
@@ -155,6 +156,51 @@ def test_wordlist_file_must_be_a_text_dictionary(client, tmp_path, monkeypatch):
     )
     assert rejected.status_code == 422, rejected.text
     assert "纯文本字典" in rejected.text
+
+
+def test_candidates_are_generated_lazily_not_materialized_up_front(
+    client, tmp_path, monkeypatch
+):
+    """惰性流式化：只有被调度到的批次才真正生成，命中即停时几乎不生成后续候选。"""
+    _install_fakes(client, tmp_path, monkeypatch)
+    executor = client.app.state.real_executor
+    executor.settings = dataclasses.replace(executor.settings, decision_batch_size=2)
+
+    generated: list[int] = []
+
+    class CountingGenerator(CandidateGenerator):
+        def iter_plan_batches(self, *args, **kwargs):
+            for batch in super().iter_plan_batches(*args, **kwargs):
+                generated.append(len(batch.candidates))
+                yield batch
+
+    executor.candidate_generator = CountingGenerator()
+
+    created = client.post(
+        "/api/tasks",
+        json={
+            "name": "惰性生成",
+            "target": {"type": "hash", "content": MD5_HEX, "file_id": None},
+            "known_algorithm": "md5",
+            "time_budget": 30,
+            "candidate_budget": 20,
+            "context": {},
+        },
+    )
+    task_id = created.json()["task_id"]
+    assert client.post(f"/api/tasks/{task_id}/analyze").status_code == 200
+    assert client.post(f"/api/tasks/{task_id}/plan").status_code == 200
+    started = client.post(
+        f"/api/tasks/{task_id}/execute",
+        json={"mode": "real", "candidates": ["123456"], "stop_on_hit": True},
+    )
+    assert started.status_code == 200, started.text
+    _wait_terminal(client, started.json()["run_id"])
+
+    # 计划候选预算 20、批次 2 => 全部生成需要 10 批；命中即停后只应生成少量批次。
+    assert generated, "至少应生成首批候选"
+    assert sum(generated) <= 6, generated
+    assert len(generated) <= 4, generated
 
 
 def test_stop_on_hit_ends_run_after_first_recovery(client, tmp_path, monkeypatch):
