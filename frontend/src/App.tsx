@@ -1,6 +1,6 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError } from './api/client'
-import { parseContextLists } from './context-input'
+import { parseContextLists, parseHistoricalPasswords, parseTermList } from './context-input'
 import type {
   FileDetail,
   ExecutionMode,
@@ -29,7 +29,17 @@ const blankInput: TaskInput = {
     region: '',
     organization: '',
     description: '',
+    name: '',
+    nickname: '',
+    username: '',
+    email_local_part: '',
+    phone_suffix: '',
+    birthday: '',
+    birth_year: null,
+    interest_words: [],
+    authorized_keywords: [],
   },
+  historical_passwords: [],
 }
 
 const initialSnapshot: FlowSnapshot = {
@@ -176,6 +186,8 @@ function App() {
   const [executionMode, setExecutionMode] = useState<ExecutionMode>('mock')
   const [keywordText, setKeywordText] = useState(blankInput.context.keywords.join('，'))
   const [yearText, setYearText] = useState(blankInput.context.years.join('，'))
+  const [interestText, setInterestText] = useState('')
+  const [historicalPasswordText, setHistoricalPasswordText] = useState('')
   const [file, setFile] = useState<File | null>(null)
   const [stage, setStage] = useState<FlowStage>('idle')
   const [snapshot, setSnapshot] = useState<FlowSnapshot>(initialSnapshot)
@@ -323,7 +335,7 @@ function App() {
   const updateForm = <K extends keyof TaskInput>(key: K, value: TaskInput[K]) =>
     setForm((current) => ({ ...current, [key]: value }))
 
-  const updateContext = (key: keyof TaskInput['context'], value: string[] | number[] | string) =>
+  const updateContext = (key: keyof TaskInput['context'], value: string[] | number[] | string | number | null) =>
     setForm((current) => ({ ...current, context: { ...current.context, [key]: value } }))
 
   const updateTargetType = (type: TargetType) => {
@@ -349,7 +361,12 @@ function App() {
 
     try {
       let prepared = structuredClone(form)
-      prepared.context = { ...prepared.context, ...parseContextLists(keywordText, yearText) }
+      prepared.context = {
+        ...prepared.context,
+        ...parseContextLists(keywordText, yearText),
+        interest_words: parseTermList(interestText),
+      }
+      prepared.historical_passwords = parseHistoricalPasswords(historicalPasswordText)
       if (prepared.target.type !== 'hash') {
         if (!file) throw new Error('请选择一个经过授权的离线评测文件。')
         setStage('uploading')
@@ -560,14 +577,24 @@ function App() {
               </div>
 
               <div className="form-section">
-                <div className="form-section-title"><span>03</span><div><h2>上下文信息（可选）</h2><p>至少填写一项后启用 Context 策略；不了解的信息请留空</p></div></div>
+                <div className="form-section-title"><span>03</span><div><h2>授权信息（可选）</h2><p>个人信息与历史旧口令分区录入；不了解的信息请留空</p></div></div>
                 <div className="form-grid two">
-                  <label><span>关键词 <em>推荐填写，用逗号分隔</em></span><input value={keywordText} onChange={(e) => setKeywordText(e.target.value)} placeholder="例如：姓名、学校、项目名" /></label>
+                  <label><span>姓名</span><input value={form.context.name} onChange={(e) => updateContext('name', e.target.value)} /></label>
+                  <label><span>昵称</span><input value={form.context.nickname} onChange={(e) => updateContext('nickname', e.target.value)} /></label>
+                  <label><span>用户名</span><input value={form.context.username} onChange={(e) => updateContext('username', e.target.value)} /></label>
+                  <label><span>邮箱局部 <em>@ 前部分</em></span><input value={form.context.email_local_part} onChange={(e) => updateContext('email_local_part', e.target.value)} /></label>
+                  <label><span>电话后缀</span><input value={form.context.phone_suffix} onChange={(e) => updateContext('phone_suffix', e.target.value)} /></label>
+                  <label><span>生日</span><input value={form.context.birthday} onChange={(e) => updateContext('birthday', e.target.value)} placeholder="例如：01-23" /></label>
+                  <label><span>出生年份</span><input type="number" min="1000" max="9999" value={form.context.birth_year ?? ''} onChange={(e) => updateContext('birth_year', e.target.value ? Number(e.target.value) : null)} /></label>
+                  <label><span>关键词（其他授权信息） <em>用逗号分隔</em></span><input value={keywordText} onChange={(e) => setKeywordText(e.target.value)} placeholder="例如：项目名、宠物名" /></label>
                   <label><span>相关年份 <em>可选，用逗号分隔</em></span><input value={yearText} onChange={(e) => setYearText(e.target.value)} placeholder="例如：2024，2025" /></label>
                   <label><span>地区 <em>可选</em></span><input value={form.context.region} onChange={(e) => updateContext('region', e.target.value)} placeholder="例如：北京" /></label>
                   <label><span>组织 <em>可选</em></span><input value={form.context.organization} onChange={(e) => updateContext('organization', e.target.value)} placeholder="例如：学校、公司或实验室" /></label>
+                  <label><span>兴趣词 <em>用逗号分隔</em></span><input value={interestText} onChange={(e) => setInterestText(e.target.value)} placeholder="例如：摄影，篮球" /></label>
                 </div>
+                <label className="wide"><span>历史旧口令 <em>每行一个，仅用于当前授权任务</em></span><textarea rows={3} value={historicalPasswordText} onChange={(e) => setHistoricalPasswordText(e.target.value)} placeholder={'旧口令 1\n旧口令 2'} /></label>
                 <label className="wide"><span>补充说明 <em>可选</em></span><textarea rows={3} value={form.context.description} onChange={(e) => updateContext('description', e.target.value)} placeholder="仅作为任务备注，不参与候选生成；不确定时请留空" /></label>
+                <p className="privacy-note"><Icon name="shield" size={15} /> 明文不会发送给 LLM 或写入决策日志；任务详情只展示脱敏结构与数量。</p>
               </div>
 
               <div className="form-footer">
@@ -690,12 +717,14 @@ function App() {
                 <div><dt>当前状态</dt><dd>{taskStatusLabels[selectedTask.status]}</dd></div>
                 <div><dt>目标类型</dt><dd>{selectedTask.target.type.toUpperCase()}</dd></div>
                 <div><dt>算法</dt><dd>{selectedTask.known_algorithm ?? '自动识别'}</dd></div>
+                <div><dt>信息场景</dt><dd>{selectedTask.information_profile.scenario}</dd></div>
+                <div><dt>历史旧口令</dt><dd>{selectedTask.information_profile.historical_password_count} 个（已脱敏）</dd></div>
                 <div><dt>时间预算</dt><dd>{selectedTask.time_budget} 秒</dd></div>
                 <div><dt>候选预算</dt><dd>{formatNumber(selectedTask.candidate_budget)}</dd></div>
                 <div><dt>创建时间</dt><dd>{formatDate(selectedTask.created_at)}</dd></div>
                 <div><dt>更新时间</dt><dd>{formatDate(selectedTask.updated_at)}</dd></div>
               </dl>
-              <div className="task-context"><strong>上下文信息</strong><p>{[...selectedTask.context.keywords, ...selectedTask.context.years.map(String), selectedTask.context.region, selectedTask.context.organization, selectedTask.context.description].filter(Boolean).join(' · ') || '未提供'}</p></div>
+              <div className="task-context"><strong>授权信息摘要</strong><p>{selectedTask.information_profile.information_types.join(' · ') || '未提供个人信息'}</p></div>
               {selectedFile && <div className="file-detail"><div><span className="section-kicker">FILE DETAIL</span><strong>{selectedFile.filename}</strong></div><dl><div><dt>大小</dt><dd>{formatBytes(selectedFile.size)}</dd></div><div><dt>类型</dt><dd>{selectedFile.content_type ?? '未知'}</dd></div><div><dt>文件编号</dt><dd>{selectedFile.file_id}</dd></div><div><dt>SHA-256</dt><dd>{selectedFile.sha256}</dd></div></dl></div>}
             </article>}
           </section>

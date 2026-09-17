@@ -12,9 +12,14 @@ from sqlalchemy.orm import Session
 from .candidate_generator import CandidateBatch, CandidateGenerator
 from .candidate_types import CandidateRecord
 from .config import Settings
-from .enums import ExecutionMode, TargetType, TaskStatus
+from .enums import ExecutionMode, StrategyId, TargetType, TaskStatus
 from .errors import AppError
 from .feedback import FeedbackConfig, FeedbackService
+from .generators import (
+    GeneratorRegistry,
+    GeneratorRegistryError,
+    STRATEGY_GENERATOR_IDS,
+)
 from .hashcat_adapter import (
     HashcatAdapter,
     HashcatHandle,
@@ -53,6 +58,7 @@ from .zip_adapter import ZipHashExtractor
 from .transfer import load_transfer_knowledge
 
 ZIP_EXTRACTION_TIMEOUT = 30.0
+RUN_SNAPSHOT_SCHEMA_VERSION = 2
 LOGGER = logging.getLogger(__name__)
 
 
@@ -64,6 +70,7 @@ class _StrategyState:
     time_budget: int
     candidate_budget: int
     parameters: dict[str, Any]
+    generator_id: str = ""
     candidate_batches: tuple[tuple[str, ...], ...] = ()
     candidate_record_batches: tuple[tuple[CandidateRecord, ...], ...] = ()
     status: str = TaskStatus.RUNNING.value
@@ -121,6 +128,7 @@ class RealExecutor:
         hashcat: HashcatAdapter | None = None,
         zip_extractor: ZipHashExtractor | None = None,
         candidate_generator: CandidateGenerator | None = None,
+        generator_registry: GeneratorRegistry | None = None,
         control: RunControl | None = None,
     ) -> None:
         self.session_factory = session_factory
@@ -129,7 +137,27 @@ class RealExecutor:
         self.zip_extractor = zip_extractor or ZipHashExtractor(
             settings.zip2john_path
         )
-        self.candidate_generator = candidate_generator or CandidateGenerator()
+        if candidate_generator is not None and generator_registry is not None:
+            raise ValueError(
+                "candidate_generator 与 generator_registry 不能同时提供"
+            )
+        self.candidate_generator = candidate_generator or CandidateGenerator(
+            registry=generator_registry,
+            pcfg_variant=settings.pcfg_variant,
+            pcfg_ruleset_path=(
+                str(settings.pcfg_ruleset_path)
+                if settings.pcfg_ruleset_path is not None
+                else None
+            ),
+            markov_ruleset_path=(
+                str(settings.markov_ruleset_path)
+                if settings.markov_ruleset_path is not None
+                else None
+            ),
+            markov_order=settings.markov_order,
+            s3_generator_id=settings.s3_generator_id,
+            s4_generator_id=settings.s4_generator_id,
+        )
         self.control = control
         self.feedback_config = FeedbackConfig(
             minimum_observations=settings.feedback_minimum_observations,
@@ -277,12 +305,13 @@ class RealExecutor:
                 plan,
                 supplied_candidates=payload.candidates,
                 task_context=task.context,
+                historical_passwords=task.historical_passwords,
                 transfer_patterns=transfer_patterns,
             ):
                 batches_by_strategy.setdefault(
                     batch.strategy_id.value, []
                 ).append(batch)
-        except ValueError as exc:
+        except (ValueError, GeneratorRegistryError) as exc:
             raise AppError(
                 "EXECUTION_FAILED",
                 "生成真实执行候选失败",
@@ -308,6 +337,12 @@ class RealExecutor:
                     time_budget=item.time_budget,
                     candidate_budget=item.candidate_budget,
                     parameters=item.parameters,
+                    generator_id=(
+                        generated_batches[0].generator_id
+                        if generated_batches
+                        and generated_batches[0].generator_id
+                        else STRATEGY_GENERATOR_IDS[item.strategy_id]
+                    ),
                     candidate_batches=candidate_batches,
                     candidate_record_batches=candidate_record_batches,
                     transfer_score=(
@@ -985,6 +1020,7 @@ def _serialize_snapshot(
 ) -> dict[str, Any]:
     """启动时写入运行记录的静态快照（目标、计划、候选批次等）。"""
     return {
+        "schema_version": RUN_SNAPSHOT_SCHEMA_VERSION,
         "targets": list(targets),
         "hash_mode": hash_mode,
         "expected_candidates": expected,
@@ -1000,6 +1036,12 @@ def _serialize_snapshot(
                     "time_budget": strategy.time_budget,
                     "candidate_budget": strategy.candidate_budget,
                     "parameters": dict(strategy.parameters),
+                    "generator_id": (
+                        batches_by_strategy[strategy.strategy_id.value][0].generator_id
+                        if batches_by_strategy.get(strategy.strategy_id.value)
+                        and batches_by_strategy[strategy.strategy_id.value][0].generator_id
+                        else STRATEGY_GENERATOR_IDS[strategy.strategy_id]
+                    ),
                     "transfer_score": (transfer_scores or {}).get(
                         strategy.strategy_id.value
                     ),
@@ -1064,6 +1106,7 @@ def _state_from_snapshot(
     snapshot: dict[str, Any], progress: dict[str, Any]
 ) -> list[_StrategyState]:
     """按持久化快照重建策略状态；已消费批次之前的内容不再执行。"""
+    _validate_snapshot_version(snapshot)
     entries = snapshot["plan"]["strategies"]
     batches = snapshot.get("batches", {})
     strategy_progress = progress.get("strategies", {})
@@ -1090,6 +1133,10 @@ def _state_from_snapshot(
                 time_budget=entry["time_budget"],
                 candidate_budget=entry["candidate_budget"],
                 parameters=dict(entry.get("parameters", {})),
+                generator_id=entry.get(
+                    "generator_id",
+                    STRATEGY_GENERATOR_IDS[StrategyId(strategy_id)],
+                ),
                 candidate_batches=remaining,
                 tested=int(item_progress.get("tested", 0)),
                 recovered=len(recovered_items),
@@ -1101,6 +1148,21 @@ def _state_from_snapshot(
             )
         )
     return states
+
+
+def _validate_snapshot_version(snapshot: dict[str, Any]) -> int:
+    """Accept legacy unversioned/v1 records and the registry-backed v2."""
+    raw = snapshot.get("schema_version", 1)
+    try:
+        version = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("运行快照 schema_version 无效") from exc
+    if version not in {1, RUN_SNAPSHOT_SCHEMA_VERSION}:
+        raise ValueError(
+            f"不支持的运行快照版本 {version}；"
+            f"当前支持 1 和 {RUN_SNAPSHOT_SCHEMA_VERSION}"
+        )
+    return version
 
 
 def _scheduler_from_snapshot(

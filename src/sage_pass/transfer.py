@@ -242,26 +242,3 @@ class TransferCandidateGenerator:
                     yield transformed, "controlled_substitution"
                     for value in (*years, *numbers):
                         yield f"{transformed}{value}", "controlled_substitution_plus_suffix"
-
-
-def current_task_transfer_seeds(
-    baseline_seeds: Sequence[str],
-    task_context: TaskContext | dict[str, object] | None,
-) -> tuple[str, ...]:
-    values = list(baseline_seeds)
-    if task_context is not None:
-        context = (
-            task_context
-            if isinstance(task_context, TaskContext)
-            else TaskContext.model_validate(task_context)
-        )
-        raw = [*context.keywords]
-        if context.region:
-            raw.append(context.region)
-        if context.organization:
-            raw.append(context.organization)
-        for item in raw:
-            normalized = normalize_keyword(item)
-            if normalized:
-                values.append(normalized)
-    return tuple(dict.fromkeys(values))

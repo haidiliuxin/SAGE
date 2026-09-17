@@ -34,6 +34,12 @@ class Settings:
     feedback_maximum_patterns_per_scope: int = 500
     feedback_recency_half_life_days: float = 90.0
     feedback_enable_mock: bool = False
+    pcfg_variant: str = "pcfg_lite"
+    pcfg_ruleset_path: Path | None = None
+    s3_generator_id: str | None = None
+    s4_generator_id: str | None = None
+    markov_ruleset_path: Path | None = None
+    markov_order: int = 3
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -80,4 +86,28 @@ class Settings:
             feedback_enable_mock=os.getenv(
                 "SAGE_FEEDBACK_ENABLE_MOCK", "false"
             ).strip().lower() in {"1", "true", "yes", "on"},
+            pcfg_variant=os.getenv(
+                "SAGE_PCFG_VARIANT", "pcfg_lite"
+            ).strip().lower(),
+            pcfg_ruleset_path=(
+                _as_path(value)
+                if (value := os.getenv("SAGE_PCFG_RULESET_PATH"))
+                else None
+            ),
+            s3_generator_id=(
+                value.strip().lower()
+                if (value := os.getenv("SAGE_S3_GENERATOR"))
+                else None
+            ),
+            s4_generator_id=(
+                value.strip().lower()
+                if (value := os.getenv("SAGE_S4_GENERATOR"))
+                else None
+            ),
+            markov_ruleset_path=(
+                _as_path(value)
+                if (value := os.getenv("SAGE_MARKOV_RULESET_PATH"))
+                else None
+            ),
+            markov_order=int(os.getenv("SAGE_MARKOV_ORDER", "3")),
         )

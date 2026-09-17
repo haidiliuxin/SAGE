@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Sequence
-from dataclasses import dataclass
+from datetime import datetime, timezone
 
-from .candidate_types import CandidateRecord, CandidateSource
-from .context import iter_context_candidates
+from .candidate_types import CandidateBatch, CandidateRecord
 from .enums import StrategyId
-from .pcfg_lite import (
-    DEFAULT_MAX_STRUCTURE_LENGTH,
-    DEFAULT_MAX_TEMPLATES,
-    DEFAULT_MIN_PROBABILITY,
-    iter_pcfg_candidates,
+from .generators import (
+    STRATEGY_GENERATOR_IDS,
+    GeneratorPrepareRequest,
+    GeneratorProtocol,
+    GeneratorRegistry,
+    GeneratorSnapshot,
+    GeneratorState,
+    build_default_registry,
 )
+from .information import build_information_profile
 from .schemas import StrategyPlan, TaskContext
 from .transfer import (
     PatternLike,
@@ -37,31 +40,8 @@ DEFAULT_YEAR_SUFFIXES = (
 )
 DEFAULT_SYMBOL_SUFFIXES = ("!", "@", "#")
 
-_S2_PARAMETER_NAMES = frozenset({
-    "capitalize_first", "all_upper", "all_lower", "common_number_suffix",
-    "year_suffix", "common_substitution", "symbol_suffix",
-})
-_COMMON_SUBSTITUTIONS = str.maketrans({
-    "a": "@", "A": "@", "e": "3", "E": "3", "i": "1", "I": "1",
-    "o": "0", "O": "0", "s": "5", "S": "5",
-})
-
-
-@dataclass(frozen=True, slots=True)
-class CandidateBatch:
-    strategy_id: StrategyId
-    candidates: tuple[str, ...]
-    records: tuple[CandidateRecord, ...] = ()
-
-    def __post_init__(self) -> None:
-        if self.records and len(self.records) != len(self.candidates):
-            raise ValueError("records 与 candidates 数量必须一致")
-        if self.records and tuple(item.value for item in self.records) != self.candidates:
-            raise ValueError("records 与 candidates 的值和顺序必须一致")
-
-
 class CandidateGenerator:
-    """Generate ordered S1-S5 candidates under shared deduplication limits."""
+    """Registry-backed pipeline with shared validation, budgets, and dedupe."""
 
     def __init__(
         self,
@@ -71,12 +51,38 @@ class CandidateGenerator:
         year_suffixes: Sequence[str] = DEFAULT_YEAR_SUFFIXES,
         symbol_suffixes: Sequence[str] = DEFAULT_SYMBOL_SUFFIXES,
         transfer_generator: TransferCandidateGenerator | None = None,
+        registry: GeneratorRegistry | None = None,
+        pcfg_variant: str = "pcfg_lite",
+        pcfg_ruleset_path: str | None = None,
+        markov_ruleset_path: str | None = None,
+        markov_order: int = 3,
+        s3_generator_id: str | None = None,
+        s4_generator_id: str | None = None,
     ) -> None:
         self.baseline_candidates = tuple(baseline_candidates)
         self.number_suffixes = tuple(number_suffixes)
         self.year_suffixes = tuple(year_suffixes)
         self.symbol_suffixes = tuple(symbol_suffixes)
-        self.transfer_generator = transfer_generator or TransferCandidateGenerator()
+        self.registry = registry or build_default_registry(
+            transfer_generator=transfer_generator,
+            pcfg_ruleset_path=pcfg_ruleset_path,
+            markov_ruleset_path=markov_ruleset_path,
+            markov_order=markov_order,
+        )
+        selected_s3_generator = s3_generator_id or pcfg_variant
+        if selected_s3_generator not in {"pcfg_lite", "pcfg_full", "markov"}:
+            raise ValueError(
+                "S3 generator 必须为 'pcfg_lite'、'pcfg_full' 或 'markov'"
+            )
+        self.strategy_generator_ids = dict(STRATEGY_GENERATOR_IDS)
+        self.strategy_generator_ids[StrategyId.S3] = selected_s3_generator
+        if s4_generator_id not in {None, "auto", "context", "history", "hybrid"}:
+            raise ValueError(
+                "S4 generator 必须为 'auto'、'context'、'history' 或 'hybrid'"
+            )
+        self.s4_generator_id = (
+            None if s4_generator_id in {None, "auto"} else s4_generator_id
+        )
         _validate_source(self.baseline_candidates, "baseline_candidates")
         _validate_suffixes(self.number_suffixes, "number_suffixes")
         _validate_suffixes(self.year_suffixes, "year_suffixes")
@@ -90,6 +96,7 @@ class CandidateGenerator:
         rule_seeds: Iterable[str] | None = None,
         pcfg_seeds: Iterable[str] | None = None,
         task_context: TaskContext | dict[str, object] | None = None,
+        historical_passwords: Iterable[str] = (),
         transfer_patterns: Sequence[PatternLike] = (),
         batch_size: int = DEFAULT_BATCH_SIZE,
         max_candidates: int = MAX_EXECUTION_CANDIDATES,
@@ -103,15 +110,6 @@ class CandidateGenerator:
         supplied = tuple(supplied_candidates)
         _validate_source(supplied, "supplied_candidates")
         baseline_values = _stable_unique((*supplied, *self.baseline_candidates))
-        supplied_set = set(supplied)
-        baseline_records = tuple(
-            CandidateRecord(value, StrategyId.S1, (CandidateSource(
-                kind="supplied" if value in supplied_set else "baseline",
-                original=value,
-                normalized=value,
-            ),))
-            for value in baseline_values
-        )
         prepared_rule_seeds = baseline_values if rule_seeds is None else tuple(rule_seeds)
         prepared_pcfg_seeds = baseline_values if pcfg_seeds is None else tuple(pcfg_seeds)
         prepared_transfer_seeds = current_task_transfer_seeds(
@@ -119,40 +117,92 @@ class CandidateGenerator:
         )
         _validate_source(prepared_rule_seeds, "rule_seeds")
         _validate_source(prepared_pcfg_seeds, "pcfg_seeds")
+        prepared_context = (
+            task_context
+            if isinstance(task_context, TaskContext)
+            else TaskContext.model_validate(task_context)
+            if task_context is not None
+            else None
+        )
+        prepared_history = tuple(dict.fromkeys(historical_passwords))
+        _validate_source(prepared_history, "historical_passwords")
+        information_profile = build_information_profile(
+            prepared_context, prepared_history
+        )
+        context_years = (
+            tuple(str(year) for year in prepared_context.years)
+            if prepared_context is not None
+            else ()
+        )
+        effective_years = context_years or self.year_suffixes
+        personalized_years = _stable_unique((
+            str(datetime.now(timezone.utc).year),
+            *context_years,
+            *self.year_suffixes,
+        ))
 
         seen: set[str] = set()
         total = 0
         for strategy in sorted(plan.strategies, key=lambda item: item.priority):
             if strategy.candidate_budget <= 0:
                 continue
-            records = self._records_for_strategy(
+            generator_id = self._generator_id_for_strategy(
                 strategy.strategy_id,
-                strategy.parameters,
-                baseline_records=baseline_records,
+                has_personal_information=(
+                    information_profile.has_personal_information
+                ),
+                has_historical_passwords=(
+                    information_profile.has_historical_passwords
+                ),
+            )
+            generator = self.registry.get(generator_id)
+            state = generator.prepare(GeneratorPrepareRequest(
+                strategy_id=strategy.strategy_id,
+                parameters=strategy.parameters,
+                supplied_candidates=supplied,
+                baseline_candidates=self.baseline_candidates,
                 rule_seeds=prepared_rule_seeds,
                 pcfg_seeds=prepared_pcfg_seeds,
-                task_context=task_context,
-                transfer_patterns=transfer_patterns,
+                task_context=prepared_context,
+                historical_passwords=prepared_history,
+                transfer_patterns=tuple(transfer_patterns),
                 transfer_seeds=prepared_transfer_seeds,
+                number_suffixes=self.number_suffixes,
+                rule_year_suffixes=self.year_suffixes,
+                year_suffixes=effective_years,
+                personalized_years=personalized_years,
+                symbol_suffixes=self.symbol_suffixes,
+            ))
+            yield from self._iter_strategy_batches(
+                generator_id=generator_id,
+                generator=generator,
+                state=state,
+                strategy_budget=strategy.candidate_budget,
+                batch_size=batch_size,
+                max_candidates=max_candidates,
+                seen=seen,
+                total_so_far=total,
             )
-            accepted = 0
-            batch: list[CandidateRecord] = []
-            for record in records:
-                if record.value in seen or not _is_valid_candidate(record.value):
-                    continue
-                seen.add(record.value)
-                batch.append(record)
-                accepted += 1
-                total += 1
-                if len(batch) == batch_size:
-                    yield _to_batch(strategy.strategy_id, batch)
-                    batch.clear()
-                if accepted >= strategy.candidate_budget or total >= max_candidates:
-                    break
-            if batch:
-                yield _to_batch(strategy.strategy_id, batch)
+            total = len(seen)
             if total >= max_candidates:
                 return
+
+    def _generator_id_for_strategy(
+        self,
+        strategy_id: StrategyId,
+        *,
+        has_personal_information: bool,
+        has_historical_passwords: bool,
+    ) -> str:
+        if strategy_id != StrategyId.S4:
+            return self.strategy_generator_ids[strategy_id]
+        if self.s4_generator_id is not None:
+            return self.s4_generator_id
+        if has_personal_information and has_historical_passwords:
+            return "hybrid"
+        if has_historical_passwords:
+            return "history"
+        return "context"
 
     def build_execute_candidates(self, plan: StrategyPlan, **kwargs: object) -> list[str]:
         """Build the flat string list accepted by ExecutionRequest."""
@@ -170,99 +220,87 @@ class CandidateGenerator:
             for record in batch.records
         ]
 
-    def _records_for_strategy(
+    def _iter_strategy_batches(
         self,
-        strategy_id: StrategyId,
-        parameters: dict[str, object],
         *,
-        baseline_records: tuple[CandidateRecord, ...],
-        rule_seeds: tuple[str, ...],
-        pcfg_seeds: tuple[str, ...],
-        task_context: TaskContext | dict[str, object] | None,
-        transfer_patterns: Sequence[PatternLike],
-        transfer_seeds: tuple[str, ...],
-    ) -> Iterator[CandidateRecord]:
-        if strategy_id == StrategyId.S1:
-            yield from baseline_records
-        elif strategy_id == StrategyId.S2:
-            yield from self._iter_rule_records(rule_seeds, parameters)
-        elif strategy_id == StrategyId.S3:
-            years = _context_years(task_context) or self.year_suffixes
-            yield from iter_pcfg_candidates(
-                pcfg_seeds,
-                years=years,
-                numbers=self.number_suffixes,
-                symbols=self.symbol_suffixes,
-                max_templates=int(parameters.get("max_templates", DEFAULT_MAX_TEMPLATES)),
-                min_probability=float(parameters.get("min_probability", DEFAULT_MIN_PROBABILITY)),
-                max_structure_length=int(parameters.get(
-                    "max_structure_length", DEFAULT_MAX_STRUCTURE_LENGTH
-                )),
+        generator_id: str,
+        generator: GeneratorProtocol,
+        state: GeneratorState,
+        strategy_budget: int,
+        batch_size: int,
+        max_candidates: int,
+        seen: set[str],
+        total_so_far: int,
+    ) -> Iterator[CandidateBatch]:
+        accepted = 0
+        total = total_so_far
+        output: list[CandidateRecord] = []
+        while (
+            accepted < strategy_budget
+            and total < max_candidates
+            and not generator.exhausted(state)
+        ):
+            capacity = min(
+                batch_size - len(output),
+                strategy_budget - accepted,
+                max_candidates - total,
             )
-        elif strategy_id == StrategyId.S4 and task_context is not None:
-            yield from iter_context_candidates(task_context, parameters=parameters)
-        elif strategy_id == StrategyId.S5 and transfer_patterns:
-            years = _context_years(task_context) or self.year_suffixes
-            yield from self.transfer_generator.iter_records(
-                transfer_patterns,
-                seeds=transfer_seeds,
-                years=years,
-                numbers=self.number_suffixes,
-                symbols=self.symbol_suffixes,
-            )
-
-    def _iter_rule_records(
-        self,
-        seeds: Iterable[str],
-        parameters: dict[str, object],
-    ) -> Iterator[CandidateRecord]:
-        enabled = {name for name in _S2_PARAMETER_NAMES if parameters.get(name) is True}
-        for seed in seeds:
-            direct: list[tuple[str, str]] = []
-            if "capitalize_first" in enabled:
-                direct.append((seed[:1].upper() + seed[1:], "capitalize_first"))
-            if "all_upper" in enabled:
-                direct.append((seed.upper(), "all_upper"))
-            if "all_lower" in enabled:
-                direct.append((seed.lower(), "all_lower"))
-            if "common_substitution" in enabled:
-                direct.append((seed.translate(_COMMON_SUBSTITUTIONS), "common_substitution"))
-
-            stems = _stable_unique((seed, *(value for value, _ in direct)))
-            for value, rule in direct:
-                if value != seed:
-                    yield _rule_record(value, seed, rule)
-            for rule, suffixes in (
-                ("common_number_suffix", self.number_suffixes),
-                ("year_suffix", self.year_suffixes),
-                ("symbol_suffix", self.symbol_suffixes),
-            ):
-                if rule not in enabled:
+            raw_batch = generator.next_batch(state, capacity)
+            if not raw_batch.records and not raw_batch.exhausted:
+                raise RuntimeError(
+                    f"生成器 {generator_id!r} 未耗尽但返回了空批次"
+                )
+            for record in raw_batch.records:
+                if record.value in seen or not _is_valid_candidate(record.value):
                     continue
-                for stem in stems:
-                    for suffix in suffixes:
-                        yield _rule_record(f"{stem}{suffix}", seed, rule)
+                seen.add(record.value)
+                output.append(record)
+                accepted += 1
+                total += 1
+            if len(output) == batch_size:
+                yield _pipeline_batch(
+                    generator_id,
+                    state.strategy_id,
+                    output,
+                    exhausted=(
+                        generator.exhausted(state)
+                        or accepted >= strategy_budget
+                        or total >= max_candidates
+                    ),
+                    snapshot=generator.snapshot(state),
+                )
+                output.clear()
+        if output:
+            yield _pipeline_batch(
+                generator_id,
+                state.strategy_id,
+                output,
+                exhausted=(
+                    generator.exhausted(state)
+                    or accepted >= strategy_budget
+                    or total >= max_candidates
+                ),
+                snapshot=generator.snapshot(state),
+            )
 
 
-def _rule_record(value: str, seed: str, rule: str) -> CandidateRecord:
-    return CandidateRecord(value, StrategyId.S2, (CandidateSource(
-        kind="rule",
-        original=seed,
-        normalized=value,
-        components=(rule,),
-    ),))
-
-
-def _to_batch(strategy_id: StrategyId, records: list[CandidateRecord]) -> CandidateBatch:
+def _pipeline_batch(
+    generator_id: str,
+    strategy_id: StrategyId,
+    records: list[CandidateRecord],
+    *,
+    exhausted: bool,
+    snapshot: GeneratorSnapshot,
+) -> CandidateBatch:
     prepared = tuple(records)
-    return CandidateBatch(strategy_id, tuple(item.value for item in prepared), prepared)
-
-
-def _context_years(value: TaskContext | dict[str, object] | None) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    context = value if isinstance(value, TaskContext) else TaskContext.model_validate(value)
-    return tuple(str(year) for year in context.years)
+    return CandidateBatch(
+        strategy_id,
+        tuple(item.value for item in prepared),
+        prepared,
+        generator_id=generator_id,
+        exhausted=exhausted,
+        snapshot=snapshot,
+    )
 
 
 def _stable_unique(values: Iterable[str]) -> tuple[str, ...]:
@@ -284,9 +322,16 @@ def _validate_suffixes(values: Iterable[str], field: str) -> None:
 
 
 def _is_valid_candidate(value: object) -> bool:
-    return (
+    if not (
         isinstance(value, str)
         and 1 <= len(value) <= MAX_CANDIDATE_LENGTH
         and "\n" not in value
         and "\r" not in value
-    )
+        and "\x00" not in value
+    ):
+        return False
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        return False
+    return True

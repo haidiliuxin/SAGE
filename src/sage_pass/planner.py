@@ -25,12 +25,12 @@ from .schemas import PRIR, StrategyItem, StrategyPlan
 from .transfer import KnowledgeSummary
 
 
-PROMPT_VERSION = "week2-llm-planner-v1"
+PROMPT_VERSION = "week3-generator-taxonomy-v1"
 STRATEGY_NAMES = {
     StrategyId.S1: "Baseline",
     StrategyId.S2: "Rule",
-    StrategyId.S3: "PCFG-lite",
-    StrategyId.S4: "Context",
+    StrategyId.S3: "Statistical Model",
+    StrategyId.S4: "Personalized",
     StrategyId.S5: "Transfer",
 }
 
@@ -114,8 +114,10 @@ LLM_PLAN_JSON_SCHEMA: dict[str, Any] = {
 
 PLANNER_INSTRUCTIONS = """You are the strategy selector for an authorized offline
 password security assessment. You receive only a structured Task Profile (PRIR).
-Choose and budget strategies from S1 Baseline, S2 Rule, S3 PCFG-lite, S4
-Context, and S5 Transfer. Use S4 only when context_available is true and use S5
+Choose and budget strategies from S1 Baseline, S2 Rule, S3 Statistical Model,
+S4 Personalized, and S5 Transfer. S3 may be backed by PCFG, Markov, or a future
+PassLLM generator. S4 may be backed by Context, History, or Hybrid. Use S4 only
+when context_available is true and use S5
 only when feedback_summary.available is true. The feedback summary contains only
 aggregate abstractions; never request or generate recovered plaintext. Low verification cost permits
 broader candidate sets; high verification cost should favor smaller, higher
@@ -416,8 +418,8 @@ CANDIDATE_USAGE_RATIO = {
 STRATEGY_REASONS = {
     StrategyId.S1: "优先测试命中率最高的基线口令",
     StrategyId.S2: "对基线词进行常见大小写、数字、年份、替换和符号变换",
-    StrategyId.S3: "按有限 PCFG 结构概率扩展候选覆盖",
-    StrategyId.S4: "利用已提供的关键词、拼音、缩写、年份、地区和组织信息",
+    StrategyId.S3: "使用已配置的统计模型按概率或分数扩展候选覆盖",
+    StrategyId.S4: "利用当前用户授权的个人信息、旧口令及其抽象结构生成个性化候选",
     StrategyId.S5: "将跨任务抽象结构模式应用于当前任务授权种子",
 }
 
@@ -638,6 +640,10 @@ def _task_profile(
         "confidence": prir.confidence,
         "warnings": list(prir.warnings),
     }
+    if prir.information_profile is not None:
+        profile["information_profile"] = prir.information_profile.model_dump(
+            mode="json"
+        )
     if knowledge_summary is not None:
         profile["feedback_summary"] = knowledge_summary.public_dict()
     return profile

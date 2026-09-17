@@ -12,6 +12,43 @@ export type TargetType = 'hash' | 'zip' | 'pdf' | 'office' | 'unknown'
 export type PlannerType = 'mock' | 'rule' | 'llm' | 'adaptive'
 export type ExecutionMode = 'mock' | 'real'
 export type StrategyId = 'S1' | 'S2' | 'S3' | 'S4' | 'S5'
+export type InformationScenario = 'I0' | 'I1' | 'I2' | 'I3'
+export type InformationType =
+  | 'name' | 'nickname' | 'username' | 'email_local_part' | 'phone_suffix'
+  | 'birthday_or_year' | 'region' | 'organization' | 'interest_word'
+  | 'authorized_keyword'
+
+export interface TaskContext {
+  keywords: string[]
+  years: number[]
+  region: string
+  organization: string
+  description: string
+  name: string
+  nickname: string
+  username: string
+  email_local_part: string
+  phone_suffix: string
+  birthday: string
+  birth_year: number | null
+  interest_words: string[]
+  authorized_keywords: string[]
+}
+
+export interface InformationProfile {
+  scenario: InformationScenario
+  has_personal_information: boolean
+  information_types: InformationType[]
+  has_historical_passwords: boolean
+  historical_password_count: number
+  has_pattern_knowledge: boolean
+  structure_summary: {
+    personal_field_count: number
+    personal_value_count: number
+    historical_length_buckets: Record<string, number>
+    historical_character_classes: Record<string, number>
+  }
+}
 
 export interface TaskInput {
   name: string
@@ -23,13 +60,8 @@ export interface TaskInput {
   known_algorithm: string | null
   time_budget: number
   candidate_budget: number
-  context: {
-    keywords: string[]
-    years: number[]
-    region: string
-    organization: string
-    description: string
-  }
+  context: TaskContext
+  historical_passwords: string[]
 }
 
 export interface TaskCreated {
@@ -48,13 +80,8 @@ export interface TaskDetail extends TaskCreated {
   known_algorithm: string | null
   time_budget: number
   candidate_budget: number
-  context: {
-    keywords: string[]
-    years: number[]
-    region: string | null
-    organization: string | null
-    description: string | null
-  }
+  context: TaskContext
+  information_profile: InformationProfile
   updated_at: string
 }
 
@@ -87,6 +114,7 @@ export interface PRIR {
   status: TaskStatus
   confidence: number
   warnings: string[]
+  information_profile: InformationProfile | null
 }
 
 export interface Strategy {
