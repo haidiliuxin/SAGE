@@ -440,5 +440,9 @@ main { grid-column: 2; min-width: 0; }
 .research-error { color: #a12323; }
 .research-run { display: flex; justify-content: space-between; flex-wrap: wrap; align-items: center; gap: 12px; border-bottom: 1px solid #e2e8f0; padding: 14px 0; }
 .research-run strong { overflow-wrap: anywhere; }
+.research-run-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.run-result { flex: 1 1 100%; padding: 14px 16px; border: 1px solid #dde5ec; border-radius: 6px; background: #f8fafc; }
+.run-result .recovered-list li { border-bottom-color: #e2e8f0; }
+.run-result .research-table { margin-top: 12px; }
 .research-panel a.button { text-decoration: none; }
 @media (max-width: 640px) { .research-panel { padding: 16px; } .research-panel .panel-head { flex-wrap: wrap; gap: 12px; } }

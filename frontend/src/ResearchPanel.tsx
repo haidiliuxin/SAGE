@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from './api/client'
 import type { Metrics, ResearchEvent, ResearchPage, ResearchSummary, RunPage } from './research-types'
+import type { RunResult } from './types'
 
 const names: Record<string, string> = {
   fixed: '固定顺序', round_robin: '轮询', heuristic_bandit: '启发式 Bandit', ucb: 'UCB', cost_aware_ucb: '成本感知 UCB',
@@ -130,11 +131,58 @@ export function ResearchPanel({ runId }: { runId: string }) {
   </section>
 }
 
+export function RunResultView({ runId }: { runId: string }) {
+  const [result, setResult] = useState<RunResult | null>(null)
+  const [error, setError] = useState('')
+  const [retry, setRetry] = useState(0)
+  const [copied, setCopied] = useState<string | null>(null)
+
+  useEffect(() => {
+    let active = true
+    setResult(null); setError('')
+    api.getResult(runId).then(data => { if (active) setResult(data) }).catch(caught => { if (active) setError(errorText(caught)) })
+    return () => { active = false }
+  }, [runId, retry])
+
+  const copy = async (value: string) => {
+    try {
+      const clipboard = globalThis.navigator?.clipboard
+      if (!clipboard) throw new Error('clipboard unavailable')
+      await clipboard.writeText(value)
+      setCopied(value)
+    } catch {
+      setCopied(null)
+    }
+  }
+
+  if (error) {
+    return <div className="run-result"><p role="alert">结果读取失败：{error} <button className="button secondary" onClick={() => setRetry(v => v + 1)}>重试</button></p></div>
+  }
+  if (!result) return <div className="run-result"><p>正在读取运行结果…</p></div>
+
+  const items = result.recovered_items ?? []
+  return <div className="run-result">
+    <div className="research-badges"><span>状态 {label(result.status)}</span><span>测试 {num(result.total_tested)} 个候选</span><span>恢复 {num(result.total_recovered)} 项</span><span>耗时 {num(result.total_time)} 秒</span></div>
+    {items.length > 0
+      ? <ul className="recovered-list">{items.map((item, index) => <li key={`${item.target}-${index}`}>
+          <code className="recovered-plaintext">{item.plaintext}</code>
+          <button type="button" className="button secondary" onClick={() => void copy(item.plaintext)}>{copied === item.plaintext ? '已复制' : '复制'}</button>
+          <small className="recovered-target">来源目标 {item.target.length > 28 ? `${item.target.slice(0, 28)}…` : item.target}</small>
+        </li>)}</ul>
+      : <p>该运行没有恢复出明文（可能是 Mock 运行、未命中或反馈未知结束）。</p>}
+    {result.strategy_results?.length ? <table className="research-table"><thead><tr><th>策略</th><th>测试</th><th>恢复</th><th>耗时（秒）</th></tr></thead><tbody>
+      {result.strategy_results.map(item => <tr key={item.strategy_id}><th>{item.strategy_id}</th><td>{num(item.tested)}</td><td>{num(item.recovered)}</td><td>{num(item.time)}</td></tr>)}
+    </tbody></table> : null}
+    <p className="research-note">明文来自该次授权运行的持久化结果，仅在本地界面展示，不写入跨任务知识库。</p>
+  </div>
+}
+
 export function TaskRuns({ taskId, onOpen }: { taskId: string; onOpen: (runId: string) => void }) {
   const [page, setPage] = useState<RunPage | null>(null)
   const [offset, setOffset] = useState(0)
   const [error, setError] = useState('')
   const [retry, setRetry] = useState(0)
+  const [resultRunId, setResultRunId] = useState<string | null>(null)
   useEffect(() => {
     let active = true
     setPage(null); setError('')
@@ -144,7 +192,14 @@ export function TaskRuns({ taskId, onOpen }: { taskId: string; onOpen: (runId: s
   return <section className="research-history"><h3>历史运行与研究详情</h3>
     {error && <p role="alert">{error} <button onClick={() => setRetry(v => v + 1)}>重试</button></p>}
     {!page && !error && <p>正在读取运行记录…</p>}
-    {page?.items.map(run => <div className="research-run" key={run.run_id}><div><strong>{run.run_id}</strong><p>{run.mode} · {label(run.status)} · {run.started_at ? new Date(run.started_at).toLocaleString('zh-CN') : '启动时间未知'}</p></div><button className="button secondary" onClick={() => onOpen(run.run_id)}>查看研究详情</button></div>)}
+    {page?.items.map(run => <div className="research-run" key={run.run_id}>
+      <div><strong>{run.run_id}</strong><p>{run.mode} · {label(run.status)} · {run.started_at ? new Date(run.started_at).toLocaleString('zh-CN') : '启动时间未知'}</p></div>
+      <div className="research-run-actions">
+        <button className="button secondary" onClick={() => setResultRunId(current => current === run.run_id ? null : run.run_id)}>{resultRunId === run.run_id ? '收起结果' : '查看结果'}</button>
+        <button className="button secondary" onClick={() => onOpen(run.run_id)}>查看研究详情</button>
+      </div>
+      {resultRunId === run.run_id && <RunResultView runId={run.run_id} />}
+    </div>)}
     {page?.total === 0 && <p>此任务尚无运行记录。</p>}
     <div className="research-actions"><button disabled={!page || offset === 0} onClick={() => setOffset(Math.max(0, offset - 20))}>上一页</button><button disabled={!page || offset + page.items.length >= page.total} onClick={() => setOffset(offset + 20)}>下一页</button></div>
   </section>

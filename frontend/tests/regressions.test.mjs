@@ -453,3 +453,41 @@ test('archive run selection opens the selected durable run', async (t) => {
   await act(async () => open.props.onClick())
   assert.deepEqual(opened, ['R-HISTORY'])
 })
+
+test('archive can reveal the persisted plaintext of a past run', async (t) => {
+  const renderer = await mountResearchView(t, TaskRuns, { taskId: 'T-HISTORY', onOpen: () => {} }, async url => {
+    if (url.endsWith('/result')) return Response.json({
+      task_id: 'T-HISTORY', run_id: 'R-HISTORY', status: 'completed', total_time: 22,
+      total_tested: 3267, total_recovered: 1, finished_at: new Date().toISOString(),
+      strategy_results: [{ strategy_id: 'S4', time: 7.6, tested: 1265, recovered: 1, success_rate: 0.001 }],
+      recovered_items: [{ target: '$zip2$*0*3*0*76e99cf0*508b*4a*d1aaf2$', plaintext: '网络安全2024' }],
+      message: null,
+    })
+    return Response.json({
+      items: [{ run_id: 'R-HISTORY', mode: 'real', status: 'completed', started_at: null }], total: 1, offset: 0, limit: 20,
+    })
+  })
+
+  const button = caption => renderer.root.findAllByType('button').find(b => text(b) === caption)
+  assert.doesNotMatch(text(renderer.root), /网络安全2024/)
+  await act(async () => button('查看结果').props.onClick())
+  const content = text(renderer.root)
+  assert.match(content, /网络安全2024/)
+  assert.match(content, /恢复 1 项/)
+  assert.ok(button('收起结果'))
+
+  await act(async () => button('收起结果').props.onClick())
+  assert.doesNotMatch(text(renderer.root), /网络安全2024/)
+})
+
+test('archive reports a missing run result instead of showing an empty success', async (t) => {
+  const renderer = await mountResearchView(t, TaskRuns, { taskId: 'T-HISTORY', onOpen: () => {} }, async url => {
+    if (url.endsWith('/result')) return Response.json({ error: { code: 'TASK_NOT_FOUND', message: '运行结果不存在' } }, { status: 404 })
+    return Response.json({
+      items: [{ run_id: 'R-MISSING', mode: 'mock', status: 'completed', started_at: null }], total: 1, offset: 0, limit: 20,
+    })
+  })
+  const button = renderer.root.findAllByType('button').find(b => text(b) === '查看结果')
+  await act(async () => button.props.onClick())
+  assert.match(text(renderer.root), /结果读取失败：运行结果不存在/)
+})
