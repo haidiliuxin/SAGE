@@ -25,6 +25,7 @@ async function loadSource(relativePath) {
 
 const { default: App } = await loadSource('../src/App.tsx')
 const { parseContextLists } = await loadSource('../src/context-input.ts')
+const { ResearchPanel, TaskRuns } = await loadSource('../src/ResearchPanel.tsx')
 
 function text(node) {
   if (typeof node === 'string') return node
@@ -35,6 +36,9 @@ async function openForm(t, fetchHandler) {
   const savedWindow = globalThis.window
   const savedFetch = globalThis.fetch
   globalThis.window = {
+    location: { hash: '', pathname: '/', search: '' },
+    history: { pushState() {}, replaceState() {} },
+    addEventListener() {}, removeEventListener() {}, clearTimeout() {},
     setInterval: () => 0, clearInterval: () => {},
     setTimeout: (callback) => { callback(); return 0 },
   }
@@ -107,6 +111,8 @@ function remoteFlow(strategyIds = ['S1'], overrides = {}) {
       total_tested: 123, total_recovered: 2, finished_at: new Date().toISOString(),
       strategy_results: strategies.map(({ strategy_id }) => ({ strategy_id, time: 1, tested: 100, recovered: 1, success_rate: 0.01 })),
     }
+    else if (url.endsWith('/research')) data = { run_id: runId, task_id: taskId, status: 'completed', available: false }
+    else if (url.includes('/research/events?')) data = { items: [], next_after_sequence: 0, next_before_sequence: null, has_more: false }
     else throw new Error(`Unexpected URL: ${url}`)
     return Response.json(data)
   }
@@ -288,4 +294,119 @@ test('task list keeps execution controls out of the archive view', async (t) => 
   assert.ok(!labels().includes('暂停'))
   assert.ok(!labels().includes('继续'))
   assert.ok(!labels().includes('取消任务'))
+})
+
+function researchFixture(runId = 'R-HISTORY') {
+  const state = { remaining_candidates: 90, remaining_time: 8, arms: { S1: {
+    cost_samples: 1, censored_samples: 1, estimated_startup: 0.2,
+    estimated_seconds_per_candidate: 0.1, cost_confidence: 0.05,
+    recent_throughput: null, last_batch_throughput: null,
+  } } }
+  const event = { sequence: 4, schema_version: 1, run_id: runId, attempt_id: 'attempt1', round_index: 1,
+    event_type: 'decision_completed', payload: {
+      decision: { arm_id: 'S1', strategy_id: 'S1', candidate_limit: 10, time_limit: 2, exploration: true },
+      scores: { S1: { score: 0.4, mean_reward: 0.1, exploration_bonus: 0.3, predicted_seconds: 1.2 } },
+      available_arms: ['S1'], available_batches: { S1: 10 }, updated_state: state,
+      reward: -0.2, learning_reward: 0.1,
+      reward_breakdown: { recovery_gain: 0.1, time_penalty: 0.2, candidate_penalty: 0.1, duplicate_penalty: null, total: -0.2 },
+      feedback: { candidate_count: 10, tested: 8, recovered: 1, duration: 2, duplicate_count: null },
+    } }
+  return { schema_version: 1, run_id: runId, task_id: 'T-HISTORY', available: true, status: 'completed',
+    configuration: { mode: 'real', policy_type: 'cost_aware_ucb', reward_context: { initial_targets: 10 } },
+    latest_decision: event, latest_completed: event, latest_state: state, stop_reason: 'time_budget',
+    totals: { completed_rounds: 1, submitted_candidates: 10, tested_candidates: 8, recovered_targets: 1, duration: 2, evaluation_reward: -0.2 }, through_sequence: 4,
+  }
+}
+
+async function mountResearchView(t, Component, props, handler, hash = '') {
+  const oldWindow = globalThis.window
+  const oldFetch = globalThis.fetch
+  globalThis.window = {
+    location: { hash, pathname: '/', search: '' }, history: { replaceState() {}, pushState() {} },
+    addEventListener() {}, removeEventListener() {},
+    setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {},
+  }
+  globalThis.fetch = handler
+  let renderer
+  t.after(async () => {
+    if (renderer) await act(async () => renderer.unmount())
+    globalThis.window = oldWindow; globalThis.fetch = oldFetch
+  })
+  await act(async () => { renderer = create(React.createElement(Component, props)) })
+  return renderer
+}
+
+test('research shows saved policy, distinct rewards, unknown throughput and full download', async (t) => {
+  const fixture = researchFixture()
+  const renderer = await mountResearchView(t, ResearchPanel, { runId: fixture.run_id }, async url => {
+    if (url.endsWith('/research')) return Response.json(fixture)
+    return Response.json({ items: [fixture.latest_completed], has_more: false, next_before_sequence: 4 })
+  })
+  const content = text(renderer.root)
+  assert.match(content, /本次调度：成本感知 UCB/)
+  assert.match(content, /累计评价奖励 -0.2/)
+  assert.match(content, /UCB 学习收益0.1/)
+  assert.match(content, /近期吞吐（候选\/秒）—/)
+  assert.match(content, /重复惩罚—/)
+  assert.equal(renderer.root.findByType('a').props.href, '/api/runs/R-HISTORY/research/download')
+})
+
+test('research pages backward without duplicating recent events', async (t) => {
+  const fixture = researchFixture()
+  const queries = []
+  const renderer = await mountResearchView(t, ResearchPanel, { runId: fixture.run_id }, async url => {
+    queries.push(url)
+    if (url.endsWith('/research')) return Response.json(fixture)
+    const old = url.includes('before_sequence=4')
+    return Response.json({ items: [{ ...fixture.latest_completed, sequence: old ? 1 : 4 }],
+      has_more: !old, next_before_sequence: old ? 1 : 4 })
+  })
+  const button = caption => renderer.root.findAllByType('button').find(b => text(b) === caption)
+  await act(async () => button('更早的事件').props.onClick())
+  assert.ok(queries.some(url => url.includes('before_sequence=4')))
+  assert.match(text(renderer.root), /事件 #1/)
+  assert.doesNotMatch(text(renderer.root), /事件 #4/)
+  await act(async () => button('回到最新').props.onClick())
+  assert.match(text(renderer.root), /事件 #4/)
+})
+
+test('switching runs ignores a late response from the previous run', async (t) => {
+  let resolveOld
+  const old = new Promise(resolve => { resolveOld = resolve })
+  const fixture = researchFixture('R-NEW')
+  const renderer = await mountResearchView(t, ResearchPanel, { runId: 'R-OLD' }, async url => {
+    if (url.includes('R-OLD')) return old
+    if (url.endsWith('/research')) return Response.json(fixture)
+    return Response.json({ items: [], has_more: false, next_before_sequence: null })
+  })
+  await act(async () => renderer.update(React.createElement(ResearchPanel, { runId: 'R-NEW' })))
+  await act(async () => { resolveOld(Response.json(researchFixture('R-OLD'))); await new Promise(setImmediate) })
+  assert.match(text(renderer.root), /运行 R-NEW/)
+  assert.doesNotMatch(text(renderer.root), /R-OLD/)
+})
+
+test('a fresh page opens a persisted run from its URL without starting execution', async (t) => {
+  const calls = []
+  const fixture = researchFixture()
+  const renderer = await mountResearchView(t, App, {}, async (url, init) => {
+    calls.push([url, init?.method ?? 'GET'])
+    if (url === '/health') return Response.json({ status: 'ok' })
+    if (url.endsWith('/config')) return Response.json({ planner_type: 'rule', scheduler_type: 'fixed' })
+    if (url.endsWith('/research')) return Response.json(fixture)
+    if (url.includes('/research/events?')) return Response.json({ items: [], has_more: false, next_before_sequence: null })
+    throw new Error(`Unexpected URL: ${url}`)
+  }, '#run=R-HISTORY')
+  assert.match(text(renderer.root), /本次调度：成本感知 UCB/)
+  assert.doesNotMatch(text(renderer.root), /尚未创建评测任务/)
+  assert.ok(calls.every(([, method]) => method === 'GET'))
+})
+
+test('archive run selection opens the selected durable run', async (t) => {
+  const opened = []
+  const renderer = await mountResearchView(t, TaskRuns, { taskId: 'T-HISTORY', onOpen: id => opened.push(id) }, async () => Response.json({
+    items: [{ run_id: 'R-HISTORY', mode: 'real', status: 'completed', started_at: null }], total: 1, offset: 0, limit: 20,
+  }))
+  const open = renderer.root.findAllByType('button').find(b => text(b) === '查看研究详情')
+  await act(async () => open.props.onClick())
+  assert.deepEqual(opened, ['R-HISTORY'])
 })

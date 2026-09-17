@@ -547,6 +547,22 @@ class FixedOrderScheduler(_OrderedSchedulerBase):
 class RoundRobinScheduler(_OrderedSchedulerBase):
     """各可用 Arm 轮流取一个批次（消融基线）。"""
 
+    def snapshot(self) -> dict[str, dict[str, object]]:
+        snapshot = self.snapshot_statistics()
+        snapshot["__round_robin__"] = {"next_index": self._next_index}
+        return snapshot
+
+    def restore(self, snapshot: Mapping[str, Mapping[str, object]]) -> None:
+        # Preserve the legacy statistics-only input for existing callers.
+        metadata = snapshot.get("__round_robin__", {})
+        index = metadata.get("next_index", 0)
+        if type(index) is not int or not 0 <= index < len(self._ordered_ids):
+            raise ValueError("invalid round-robin cursor")
+        self.restore_statistics({
+            key: value for key, value in snapshot.items() if key != "__round_robin__"
+        })
+        self._next_index = index
+
     def select(self, next_batch_sizes: Mapping[str, int]):
         count = len(self._ordered_ids)
         for offset in range(count):
@@ -566,10 +582,19 @@ def build_scheduler(
     total_time_budget: float,
     exploration_rounds: int = 1,
     weights: BanditWeights | None = None,
+    initial_targets: int | None = None,
+    ucb_config=None,
 ):
     """按调度类型构造策略；B 侧未交付的算法给出明确错误。"""
     from .enums import SchedulerType
 
+    if scheduler_type in {SchedulerType.UCB, SchedulerType.COST_AWARE_UCB}:
+        from .decision.ucb import UCBScheduler
+        return UCBScheduler(
+            arms, total_candidate_budget=total_candidate_budget,
+            total_time_budget=total_time_budget, initial_targets=initial_targets,
+            cost_aware=scheduler_type == SchedulerType.COST_AWARE_UCB, config=ucb_config,
+        )
     if scheduler_type == SchedulerType.HEURISTIC_BANDIT:
         return BanditScheduler(
             arms,
@@ -595,5 +620,29 @@ def build_scheduler(
     name = getattr(scheduler_type, "value", str(scheduler_type))
     raise ValueError(
         f"调度器 {name} 尚未交付（B 侧）：当前可用 fixed / round_robin / "
-        "heuristic_bandit"
+        "heuristic_bandit / ucb / cost_aware_ucb"
     )
+
+
+def decision_diagnostics(scheduler, next_batch_sizes: Mapping[str, int]) -> dict:
+    """Read-only audit using the same eligible sizes as the built-in policies.
+
+    Kept beside the implementations so integration code need not access their
+    private arm state. Call before select(), which advances the RR cursor.
+    """
+    available = {}
+    scores = {}
+    for arm_id in scheduler._ordered_ids:
+        spec = scheduler._arms[arm_id]
+        stats = scheduler._statistics[arm_id]
+        size = max(0, min(
+            next_batch_sizes.get(arm_id, 0),
+            spec.candidate_budget - stats.allocated_candidates,
+            scheduler.total_candidate_budget - scheduler.total_allocated_candidates,
+        ))
+        if not scheduler._eligible(arm_id, size):
+            size = 0
+        available[arm_id] = size
+        if size:
+            scores[arm_id] = scheduler.score(arm_id, size)
+    return {"available": available, "scores": scores}

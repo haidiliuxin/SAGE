@@ -402,3 +402,28 @@ main { grid-column: 2; min-width: 0; }
     margin-bottom: 6px;
   }
 }
+/* B: durable decision research and history views */
+.research-panel { margin: 20px 0; padding: 24px; min-width: 0; }
+.research-panel h3, .research-history h3 { margin: 22px 0 12px; }
+.research-panel h4 { margin: 14px 0 8px; }
+.research-panel p, .research-history p { line-height: 1.7; overflow-wrap: anywhere; }
+.research-panel small { overflow-wrap: anywhere; }
+.research-badges, .research-actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 14px 0; }
+.research-badges span { background: #f3f6f9; border-radius: 6px; padding: 8px 12px; }
+.research-values { display: flex; flex-wrap: wrap; gap: 12px 24px; margin: 8px 0; }
+.research-values div { min-width: 100px; }
+.research-values dt { color: #526175; font-size: 12px; }
+.research-values dd { margin: 5px 0; font-variant-numeric: tabular-nums; }
+.research-table-wrap { overflow-x: auto; }
+.research-table { width: 100%; border-collapse: collapse; text-align: left; }
+.research-table th, .research-table td { padding: 12px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
+.research-table th { white-space: nowrap; }
+.research-event { border-bottom: 1px solid #e2e8f0; padding: 14px 0; }
+.research-panel summary { cursor: pointer; line-height: 1.7; }
+.research-panel pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 400px; overflow: auto; background: #f3f6f9; padding: 14px; font-size: 12px; }
+.research-note { color: #526175; font-size: 13px; }
+.research-error { color: #a12323; }
+.research-run { display: flex; justify-content: space-between; flex-wrap: wrap; align-items: center; gap: 12px; border-bottom: 1px solid #e2e8f0; padding: 14px 0; }
+.research-run strong { overflow-wrap: anywhere; }
+.research-panel a.button { text-decoration: none; }
+@media (max-width: 640px) { .research-panel { padding: 16px; } .research-panel .panel-head { flex-wrap: wrap; gap: 12px; } }

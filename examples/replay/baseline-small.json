@@ -1,0 +1,20 @@
+{
+  "arms": [
+    {"arm_id": "baseline-default", "strategy_id": "S1", "generator_id": "baseline", "priority": 1, "candidate_budget": 8, "time_budget": 10},
+    {"arm_id": "rule-default", "strategy_id": "S2", "generator_id": "rule", "priority": 2, "candidate_budget": 8, "time_budget": 10},
+    {"arm_id": "pcfg-lite-default", "strategy_id": "S3", "generator_id": "pcfg_lite", "priority": 3, "candidate_budget": 8, "time_budget": 10}
+  ],
+  "candidate_streams": {
+    "baseline-default": ["c01", "c02", "c03", "c04", "c05", "c06", "c07", "c08"],
+    "rule-default": ["c01", "c09", "c10", "c11", "c12", "c13", "c14", "c15"],
+    "pcfg-lite-default": ["c02", "c16", "c17", "c18", "c19", "c20", "c21", "c22"]
+  },
+  "target_ids": ["u01", "u02", "u03", "u04", "u05", "u06"],
+  "matches": {"c03": ["u01"], "c09": ["u02", "u03"], "c10": ["u04"], "c17": ["u05"], "c22": ["u06"]},
+  "total_candidate_budget": 12,
+  "total_time_budget": 10,
+  "batch_size": 2,
+  "seed": 2026,
+  "cost": {"startup_cost": 0.02, "seconds_per_candidate": 0.01},
+  "time_jitter": 0.1
+}

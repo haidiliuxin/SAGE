@@ -1,0 +1,60 @@
+{
+  "arms": [
+    {
+      "arm_id": "a",
+      "strategy_id": "S1",
+      "generator_id": "synthetic",
+      "priority": 1,
+      "candidate_budget": 4,
+      "time_budget": 10
+    }
+  ],
+  "candidate_streams": {
+    "a": [
+      "c1",
+      "c2",
+      "c3",
+      "c4"
+    ]
+  },
+  "target_ids": [
+    "u1",
+    "u2",
+    "u3",
+    "unreachable"
+  ],
+  "matches": {
+    "c1": [
+      "u1"
+    ],
+    "c2": [
+      "u2"
+    ],
+    "c3": [
+      "u3"
+    ]
+  },
+  "total_candidate_budget": 4,
+  "total_time_budget": 10,
+  "batch_size": 2,
+  "seed": 42,
+  "verification_profile": {
+    "algorithm": "md5",
+    "hash_mode": 0,
+    "target_count": 4,
+    "salts": {
+      "mode": "unsalted",
+      "group_sizes": [
+        4
+      ]
+    },
+    "device": "example-device",
+    "engine_version": "example-version",
+    "parameters": {}
+  },
+  "salt_cost_model": {
+    "startup_cost": 0.2,
+    "group_hash_seconds": 0.01,
+    "compare_seconds": 0.001
+  }
+}
