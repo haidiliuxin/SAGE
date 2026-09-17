@@ -11,6 +11,7 @@ S2_PARAMETER_NAMES = frozenset({
     "capitalize_first", "all_upper", "all_lower", "common_number_suffix",
     "year_suffix", "common_substitution", "symbol_suffix",
 })
+HASHCAT_MASK_PARAMETER = "hashcat_masks"
 COMMON_SUBSTITUTIONS = str.maketrans({
     "a": "@", "A": "@", "e": "3", "E": "3", "i": "1", "I": "1",
     "o": "0", "O": "0", "s": "5", "S": "5",
@@ -22,6 +23,7 @@ class RuleGenerator(ReplayableGenerator):
     strategy_id = StrategyId.S2
 
     def prepare(self, request: GeneratorPrepareRequest) -> GeneratorState:
+        masks = _validated_masks(request.parameters.get(HASHCAT_MASK_PARAMETER))
         return self._new_state(
             request,
             restore_data={
@@ -29,10 +31,23 @@ class RuleGenerator(ReplayableGenerator):
                 "number_suffixes": list(request.number_suffixes),
                 "year_suffixes": list(request.rule_year_suffixes),
                 "symbol_suffixes": list(request.symbol_suffixes),
+                "hashcat_masks": list(masks),
             },
         )
 
     def _iter_records(self, state: GeneratorState) -> Iterator[CandidateRecord]:
+        masks = tuple(
+            str(item) for item in state.restore_data.get("hashcat_masks", [])
+        )
+        if masks:
+            for mask in masks:
+                yield CandidateRecord(
+                    mask,
+                    StrategyId.S2,
+                    (CandidateSource(kind="hashcat_mask", template=mask),),
+                )
+            return
+
         enabled = {
             name
             for name in S2_PARAMETER_NAMES
@@ -90,3 +105,20 @@ def _rule_record(value: str, seed: str, rule: str) -> CandidateRecord:
             components=(rule,),
         ),),
     )
+
+
+def _validated_masks(value: object) -> tuple[str, ...]:
+    if value is None or value is False:
+        return ()
+    if isinstance(value, str):
+        raw = (value,)
+    elif isinstance(value, list | tuple):
+        raw = tuple(value)
+    else:
+        raise ValueError("hashcat_masks 必须为字符串或字符串列表")
+    masks: list[str] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, str) or not item or "\n" in item or "\r" in item:
+            raise ValueError(f"hashcat_masks[{index}] 必须为非空单行文本")
+        masks.append(item)
+    return tuple(dict.fromkeys(masks))

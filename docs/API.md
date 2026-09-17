@@ -214,7 +214,7 @@ paused   -> running | completed | failed | cancelled
 
 **暂停/继续（第 3 周）**：`running` 任务可 `PATCH {"status":"paused"}` 暂停，`paused` 任务可 `PATCH {"status":"running"}` 继续，或 `PATCH {"status":"cancelled"}` 取消。Mock 执行在暂停期间冻结进度；真实执行在**候选批次边界**暂停（当前批次结束后进入 `paused`，运行状态消息会先提示“等待当前批次结束”），继续后从下一批候选恢复。取消会同步停止底层 Hashcat 进程（含暂停中取消）。
 
-**异常恢复（第 3 周）**：真实执行每次启动都会写入 `RunRecordModel`（目标、计划、候选批次、逐批进度与调度统计检查点）。服务重启后，处于 `running/paused` 的真实运行会自动从断点续跑（跳过已消费批次，至多整批重跑一次正在执行的那一批）；其余无运行记录的残留任务仍由启动收尾（全部策略行已完成则任务置为 `completed`，否则置为 `failed`），避免状态悬挂。暂停状态在重启后被自动继续。
+**异常恢复（第 3 周）**：真实执行每次启动都会写入 `RunRecordModel`（目标、计划、候选流游标、去重 digest 索引、逐批进度与调度统计检查点）。服务重启后，处于 `running/paused` 的真实运行会自动从断点续跑（跳过已消费批次，至多整批重跑一次正在执行的那一批）；其余无运行记录的残留任务仍由启动收尾（全部策略行已完成则任务置为 `completed`，否则置为 `failed`），避免状态悬挂。暂停状态在重启后被自动继续。
 
 ## Analyzer 与 Planner
 
@@ -331,6 +331,11 @@ Mock（第一周链路，无需候选）：
 - `stop_on_hit`：可选（默认取 `SAGE_STOP_ON_HIT`）。为 `true` 时采用真实破解语义：任一策略恢复出目标后立即结束本次运行，研究停止原因为 `all_targets_recovered`，不再消耗剩余候选。
 - `candidates`：可选，最多 10 万条单行文本。作为高优先级候选进入 S1（前端支持粘贴或导入 `.txt` 词表）。更大的字典请放到服务器上并配置 `SAGE_WORDLIST_PATH`：此时 S1 改为 **hashcat 原生词表攻击**（`--attack-mode 0 <词表>`，单进程读完整本字典，不经过 Python 候选列表，也不写入临时候选文件）。
 
+策略参数可启用 Hashcat 原生规则/掩码/混合攻击而不在后端展开全部候选：
+`hashcat_rule_files` / `hashcat_inline_rules` 转为 `-r` 规则文件，
+`hashcat_masks` 转为 `--attack-mode 3`，`hashcat_hybrid_mask` 加
+`hashcat_hybrid_position=left|right` 转为 `--attack-mode 7|6`。
+
 返回：
 
 ```json
@@ -349,6 +354,7 @@ Mock（第一周链路，无需候选）：
 - S1 使用后端内置的有序 Baseline 候选；请求中可选的 `candidates` 会排在内置候选之前；
 - S2 以补充候选和 S1 基线为种子，只执行当前 `StrategyItem.parameters` 中值为 `true` 的规则；
 - S2 支持 `capitalize_first`、`all_upper`、`all_lower`、`common_number_suffix`、`year_suffix`、`common_substitution` 和 `symbol_suffix`；
+- S2 支持 Hashcat 原生 `-r`、mask（`-a 3`）与 hybrid（`-a 6/7`）参数；mask 单元作为紧凑候选流式调度，不在后端展开成完整明文空间；
 - S3 默认使用 `pcfg_lite` 的固定有限模板 `W`、`WY`、`WD`、`C`、`CY`、`CD`、`WS`、`CS`、`WYS`、`WDS` 和 `DW`，按模板概率降序生成；`max_templates`、`min_probability` 和 `max_structure_length` 分别控制模板数、概率阈值和最终候选长度；
 - 策略层级为 S1 Baseline、S2 Rule、S3 Statistical Model、S4 Personalized、S5 Transfer。S3 可配置 `pcfg_lite`、`pcfg_full`、`markov`；S4 默认按 I1/I2/I3 自动选择 `context`、`history`、`hybrid`；S5 使用 `pattern_knowledge`；
 - 后端设置 `SAGE_PCFG_VARIANT=pcfg_full` 且配置 `SAGE_PCFG_RULESET_PATH` 后，S3 改用 MIT 许可 `pcfg_cracker` 兼容 ruleset；HTTP 请求/响应不变，候选内部来源增加原概率和自然对数 `log_probability`；
@@ -472,6 +478,7 @@ Pattern Knowledge 的作用域为 `target_type + algorithm`，只保存长度、
 | 变量 | 说明 | 默认 |
 | --- | --- | --- |
 | `SAGE_HASHCAT_PATH` | hashcat 可执行文件路径或命令名 | `hashcat` |
+| `SAGE_HASHCAT_STREAM_BATCH_SIZE` | 每个长生命周期 Hashcat 会话按需拉取的最大候选数 | `100000` |
 | `SAGE_ZIP2JOHN_PATH` | zip2john 可执行文件路径或命令名 | `zip2john` |
 | `SAGE_PDF2JOHN_PATH` | pdf2john 可执行文件路径或命令名 | `pdf2john` |
 | `SAGE_OFFICE2JOHN_PATH` | office2john 可执行文件路径或命令名 | `office2john` |

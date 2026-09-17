@@ -126,6 +126,23 @@ def test_s2_all_lower_rule_and_zero_budget():
     assert candidates == ["password"]
 
 
+def test_s2_can_emit_hashcat_mask_units_without_expanding_space():
+    generator = CandidateGenerator(baseline_candidates=("ignored",))
+    records = generator.build_candidate_records(
+        plan(
+            strategy(
+                StrategyId.S2,
+                priority=1,
+                candidate_budget=2,
+                parameters={"hashcat_masks": ["?l?l?d?d", "?u?l?l?d"]},
+            )
+        )
+    )
+
+    assert [record.value for record in records] == ["?l?l?d?d", "?u?l?l?d"]
+    assert records[0].sources[0].kind == "hashcat_mask"
+
+
 def test_plan_deduplicates_across_strategies_and_limits_each_budget():
     generator = CandidateGenerator(
         baseline_candidates=("password", "admin"),
