@@ -3,14 +3,16 @@
 约定：
 - 每个提取器实现 `supports(target_type)` 与 `extract(...)`；
 - 提取结果统一为 `ExtractedTarget`（可执行的候选 Hash 行 + 建议 Hashcat 模式）；
-- PDF / Office 优先调用成熟开源工具（next week 交付；当前返回明确错误，
-  不做静默降级）。
+- PDF / Office 调用成熟开源提取工具（pdf2john / office2john），不自行解析
+  加密格式；工具缺失、未加密、旧格式或损坏时返回明确错误，不做静默降级。
 
 真实执行只消费 `ExtractedTarget`，不再关心具体文件格式。
 """
 
 from __future__ import annotations
 
+import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, Sequence
@@ -120,10 +122,62 @@ class ZipTargetExtractor:
         )
 
 
-class PdfTargetExtractor:
-    """PDF：下一周交付（调用成熟开源提取工具，不自行解析加密格式）。"""
+class _JohnHashExtractor:
+    """通过 John the Ripper 的 *2john 脚本提取加密文件 Hash。
 
-    name = "pdf"
+    - 命令可配置（SAGE_PDF2JOHN_PATH / SAGE_OFFICE2JOHN_PATH）；
+    - 只解析输出中的 Hash 行，不自行解析加密格式；
+    - 工具缺失 / 超时 / 未加密 / 不支持的格式都返回明确错误。
+    """
+
+    name = "john"
+
+    def __init__(
+        self, command: str | Sequence[str], *, timeout: float = 30.0
+    ) -> None:
+        self.command = (command,) if isinstance(command, str) else tuple(command)
+        if not self.command:
+            raise ValueError("extractor command cannot be empty")
+        self.timeout = timeout
+
+    def _run(self, file_path: Path) -> str:
+        try:
+            completed = subprocess.run(
+                [*self.command, str(file_path)],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=self.timeout,
+                shell=False,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise AppError(
+                "ANALYZE_FAILED",
+                f"{self.name} 提取超时",
+                status_code=504,
+                details={"timeout": self.timeout},
+            ) from exc
+        except (FileNotFoundError, OSError) as exc:
+            raise AppError(
+                "ANALYZE_FAILED",
+                f"无法启动 {self.name} 提取工具，请检查对应的 *_PATH 配置",
+                status_code=503,
+                details={"reason": str(exc), "command": self.command[0]},
+            ) from exc
+        return "\n".join((completed.stdout, completed.stderr))
+
+
+class PdfTargetExtractor(_JohnHashExtractor):
+    """加密 PDF：调用 pdf2john 提取（hashcat 10400/10500/10600/10700/10510）。"""
+
+    name = "pdf2john"
+
+    # pdf2john 输出的 `$pdf$N$` 版本号 -> hashcat 模式（依据本机 hashcat -hh）。
+    VERSION_MODES = {1: 10400, 2: 10500, 3: 10600, 4: 10700, 5: 10510}
+    _HASH_RE = re.compile(r"(\$pdf\$\d\*[^\s:]+)")
 
     def supports(self, target_type: TargetType) -> bool:
         return target_type == TargetType.PDF
@@ -135,19 +189,57 @@ class PdfTargetExtractor:
         content: str | None = None,
         file_path: Path | None = None,
     ) -> ExtractedTarget:
-        del target_type, content, file_path
-        raise AppError(
-            "EXECUTION_FAILED",
-            "PDF 目标提取将在下一阶段交付（当前真实执行支持 Hash 与 WinZip AES ZIP）",
-            status_code=422,
-            details={"extractor": self.name, "stage": "pending"},
+        del target_type, content
+        if file_path is None or not file_path.is_file():
+            raise AppError(
+                "EXECUTION_FAILED",
+                "PDF 目标文件不存在",
+                status_code=422,
+                details={"filename": file_path.name if file_path else None},
+            )
+        output = self._run(file_path)
+        hashes = tuple(dict.fromkeys(self._HASH_RE.findall(output)))
+        if not hashes:
+            raise AppError(
+                "EXECUTION_FAILED",
+                "未从 PDF 中提取到受支持的加密目标（可能未加密或使用了不支持的加密版本）",
+                status_code=422,
+                details={"extractor": self.name},
+            )
+        version_match = re.match(r"\$pdf\$(\d)\*", hashes[0])
+        version = int(version_match.group(1)) if version_match else None
+        mode = self.VERSION_MODES.get(version) if version is not None else None
+        if mode is None:
+            raise AppError(
+                "EXECUTION_FAILED",
+                "暂不支持该 PDF 加密版本",
+                status_code=422,
+                details={"version": version, "supported": sorted(self.VERSION_MODES)},
+            )
+        return ExtractedTarget(
+            hashes=hashes,
+            source=self.name,
+            hashcat_mode=mode,
+            algorithm="pdf",
         )
 
 
-class OfficeTargetExtractor:
-    """Office：下一周交付 DOCX/XLSX/PPTX（调用成熟开源提取工具）。"""
+class OfficeTargetExtractor(_JohnHashExtractor):
+    """加密 Office：调用 office2john 提取（hashcat 9700/9800/9400/9500/9600）。"""
 
-    name = "office"
+    name = "office2john"
+
+    # (匹配标记, hashcat 模式, 说明)
+    SIGNATURES: tuple[tuple[str, int, str], ...] = (
+        ("$oldoffice$0", 9700, "MS Office <= 2003 ($0/$1)"),
+        ("$oldoffice$1", 9700, "MS Office <= 2003 ($0/$1)"),
+        ("$oldoffice$3", 9800, "MS Office <= 2003 ($3/$4)"),
+        ("$oldoffice$4", 9800, "MS Office <= 2003 ($3/$4)"),
+        ("*2007*", 9400, "MS Office 2007"),
+        ("*2010*", 9500, "MS Office 2010"),
+        ("*2013*", 9600, "MS Office 2013+"),
+    )
+    _HASH_RE = re.compile(r"(\$(?:oldoffice|office)\$[^\s:]+)")
 
     def supports(self, target_type: TargetType) -> bool:
         return target_type == TargetType.OFFICE
@@ -159,12 +251,37 @@ class OfficeTargetExtractor:
         content: str | None = None,
         file_path: Path | None = None,
     ) -> ExtractedTarget:
-        del target_type, content, file_path
+        del target_type, content
+        if file_path is None or not file_path.is_file():
+            raise AppError(
+                "EXECUTION_FAILED",
+                "Office 目标文件不存在",
+                status_code=422,
+                details={"filename": file_path.name if file_path else None},
+            )
+        output = self._run(file_path)
+        hashes = tuple(dict.fromkeys(self._HASH_RE.findall(output)))
+        if not hashes:
+            raise AppError(
+                "EXECUTION_FAILED",
+                "未从 Office 文档中提取到受支持的加密目标（可能未加密或为旧版格式）",
+                status_code=422,
+                details={"extractor": self.name},
+            )
+        for marker, mode, label in self.SIGNATURES:
+            if marker in hashes[0]:
+                return ExtractedTarget(
+                    hashes=hashes,
+                    source=self.name,
+                    hashcat_mode=mode,
+                    algorithm="office",
+                    warnings=(f"识别为 {label}",),
+                )
         raise AppError(
             "EXECUTION_FAILED",
-            "Office 目标提取将在下一阶段交付（当前真实执行支持 Hash 与 WinZip AES ZIP）",
+            "暂不支持该 Office 加密变体",
             status_code=422,
-            details={"extractor": self.name, "stage": "pending"},
+            details={"extractor": self.name, "hash_prefix": hashes[0][:24]},
         )
 
 
@@ -172,16 +289,21 @@ def build_target_extractors(
     settings: Settings,
     *,
     zip_extractor: ZipHashExtractor | None = None,
+    pdf_extractor: PdfTargetExtractor | None = None,
+    office_extractor: OfficeTargetExtractor | None = None,
     zip_timeout: float = 30.0,
 ) -> tuple[TargetExtractor, ...]:
+    timeout = settings.extraction_timeout_seconds or zip_timeout
     return (
         HashTargetExtractor(),
         ZipTargetExtractor(
             zip_extractor or ZipHashExtractor(settings.zip2john_path),
-            timeout=zip_timeout,
+            timeout=timeout,
         ),
-        PdfTargetExtractor(),
-        OfficeTargetExtractor(),
+        pdf_extractor
+        or PdfTargetExtractor(settings.pdf2john_path, timeout=timeout),
+        office_extractor
+        or OfficeTargetExtractor(settings.office2john_path, timeout=timeout),
     )
 
 

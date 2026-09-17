@@ -23,10 +23,14 @@ class MockAnalyzer:
         session: Session,
         *,
         zip_extractor: ZipHashExtractor | None = None,
+        pdf_extractor: object | None = None,
+        office_extractor: object | None = None,
         upload_dir: Path | None = None,
     ) -> None:
         self.session = session
         self.zip_extractor = zip_extractor
+        self.pdf_extractor = pdf_extractor
+        self.office_extractor = office_extractor
         self.upload_dir = upload_dir
 
     def analyze(self, task: TaskDetail) -> PRIR:
@@ -34,6 +38,8 @@ class MockAnalyzer:
             task,
             session=self.session,
             zip_extractor=self.zip_extractor,
+            pdf_extractor=self.pdf_extractor,
+            office_extractor=self.office_extractor,
             upload_dir=self.upload_dir,
         )
         prir = PRIR(
@@ -115,6 +121,8 @@ def _analyze_target(
     session: Session,
     zip_extractor: ZipHashExtractor | None,
     upload_dir: Path | None,
+    pdf_extractor: object | None = None,
+    office_extractor: object | None = None,
 ) -> tuple[str, bool | None, VerificationCost, float, list[str]]:
     warnings: list[str] = []
     if task.known_algorithm:
@@ -142,65 +150,106 @@ def _analyze_target(
         return algorithm, _salt_for_algorithm(algorithm), _cost_for_algorithm(algorithm), 0.8, warnings
 
     if task.target.type == TargetType.ZIP:
-        return _analyze_zip(
+        return _analyze_encrypted_file(
             task,
             session=session,
-            zip_extractor=zip_extractor,
             upload_dir=upload_dir,
+            extractor=zip_extractor,
+            kind="ZIP",
+            tool="zip2john",
+            env_var="SAGE_ZIP2JOHN_PATH",
+            default_algorithm=ZIP_ALGORITHM,
         )
 
-    if task.target.type in {TargetType.PDF, TargetType.OFFICE}:
-        warnings.append("该文件类型尚未接入真实解析，仅基于文件元数据生成 PRIR")
-        return "unknown", None, VerificationCost.UNKNOWN, 0.45, warnings
+    if task.target.type == TargetType.PDF:
+        return _analyze_encrypted_file(
+            task,
+            session=session,
+            upload_dir=upload_dir,
+            extractor=pdf_extractor,
+            kind="PDF",
+            tool="pdf2john",
+            env_var="SAGE_PDF2JOHN_PATH",
+            default_algorithm="pdf",
+        )
+
+    if task.target.type == TargetType.OFFICE:
+        return _analyze_encrypted_file(
+            task,
+            session=session,
+            upload_dir=upload_dir,
+            extractor=office_extractor,
+            kind="Office",
+            tool="office2john",
+            env_var="SAGE_OFFICE2JOHN_PATH",
+            default_algorithm="office",
+        )
 
     warnings.append("目标类型未知，无法确认算法")
     return "unknown", None, VerificationCost.UNKNOWN, 0.25, warnings
 
 
-def _analyze_zip(
+def _analyze_encrypted_file(
     task: TaskDetail,
     *,
     session: Session,
-    zip_extractor: ZipHashExtractor | None,
     upload_dir: Path | None,
+    extractor: object | None,
+    kind: str,
+    tool: str,
+    env_var: str,
+    default_algorithm: str,
 ) -> tuple[str, bool | None, VerificationCost, float, list[str]]:
+    """ZIP / PDF / Office 共用的加密文件解析：成功给出算法与成本，失败明确降级。"""
     warnings: list[str] = []
-    if zip_extractor is None or upload_dir is None:
-        warnings.append("ZIP 真实解析不可用（缺少 zip2john 配置或上传目录）")
+    if extractor is None or upload_dir is None:
+        warnings.append(f"{kind} 真实解析不可用（缺少 {tool} 配置或上传目录）")
         return "unknown", None, VerificationCost.UNKNOWN, 0.45, warnings
 
     if not task.target.file_id:
-        warnings.append("ZIP 目标缺少文件引用，无法解析加密结构")
+        warnings.append(f"{kind} 目标缺少文件引用，无法解析加密结构")
         return "unknown", None, VerificationCost.UNKNOWN, 0.45, warnings
 
     file_item = FileRepository(session).get(task.target.file_id)
     if file_item is None:
-        warnings.append("ZIP 目标文件记录不存在，无法解析加密结构")
+        warnings.append(f"{kind} 目标文件记录不存在，无法解析加密结构")
         return "unknown", None, VerificationCost.UNKNOWN, 0.45, warnings
 
     archive = upload_dir / file_item.stored_name
     if not archive.is_file():
-        warnings.append("ZIP 目标文件已丢失，无法解析加密结构")
+        warnings.append(f"{kind} 目标文件已丢失，无法解析加密结构")
         return "unknown", None, VerificationCost.UNKNOWN, 0.45, warnings
 
     try:
-        extracted = zip_extractor.extract(archive)
+        # ZipHashExtractor 接受位置参数，TargetExtractor 使用关键字参数。
+        if hasattr(extractor, "supports"):
+            extracted = extractor.extract(  # type: ignore[attr-defined]
+                target_type=task.target.type,
+                content=task.target.content,
+                file_path=archive,
+            )
+        else:
+            extracted = extractor.extract(archive)  # type: ignore[attr-defined]
     except AppError as exc:
         if exc.status_code == 503:
             warnings.append(
-                "未检测到 zip2john，ZIP 真实解析需要 John the Ripper 并配置 SAGE_ZIP2JOHN_PATH"
+                f"未检测到 {tool}，{kind} 真实解析需要 John the Ripper 并配置 {env_var}"
             )
         elif exc.status_code == 504:
-            warnings.append("zip2john 解析超时，未解析加密结构")
+            warnings.append(f"{tool} 解析超时，未解析加密结构")
         else:
-            warnings.append(exc.message or "未能解析该 ZIP 的加密结构")
+            warnings.append(exc.message or f"未能解析该 {kind} 的加密结构")
         return "unknown", None, VerificationCost.UNKNOWN, 0.45, warnings
 
-    if not extracted.hashes:
-        warnings.append("未从 ZIP 中提取到受支持的加密目标")
+    if not getattr(extracted, "hashes", None):
+        warnings.append(f"未从 {kind} 中提取到受支持的加密目标")
         return "unknown", None, VerificationCost.UNKNOWN, 0.45, warnings
+
+    for extra in getattr(extracted, "warnings", ()) or ():
+        warnings.append(str(extra))
+    algorithm = getattr(extracted, "algorithm", None) or default_algorithm
     return (
-        ZIP_ALGORITHM,
+        algorithm,
         True,
         VerificationCost.MEDIUM,
         0.85,
