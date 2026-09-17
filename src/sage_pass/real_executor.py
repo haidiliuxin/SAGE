@@ -821,7 +821,7 @@ class RealExecutor:
                 state.current_strategy_id = item.strategy_id
             try:
                 handle = self.hashcat.start(
-                    HashcatJob(
+                    _hashcat_job_for_strategy(
                         run_id=(
                             f"{state.run_id}-{item.strategy_id}-"
                             f"{item.scheduled_batches}"
@@ -831,6 +831,7 @@ class RealExecutor:
                         candidates=candidates,
                         timeout_seconds=decision.time_limit,
                         candidate_budget=len(candidates),
+                        parameters=item.parameters,
                         session_dir=(str(
                             self.settings.upload_dir.parent
                             / "hashcat-sessions"
@@ -1704,3 +1705,101 @@ def _next_batch_sizes(
         )
         for item in state.strategies
     }
+
+
+def _hashcat_job_for_strategy(
+    *,
+    run_id: str,
+    target_hashes: tuple[str, ...],
+    hash_mode: int,
+    candidates: tuple[str, ...],
+    timeout_seconds: float,
+    candidate_budget: int,
+    parameters: dict[str, Any],
+    session_dir: str | None,
+) -> HashcatJob:
+    attack_mode = _hashcat_attack_mode(parameters)
+    masks = _native_masks(parameters, candidates, attack_mode)
+    job_candidates = () if attack_mode == 3 else candidates
+    return HashcatJob(
+        run_id=run_id,
+        target_hashes=target_hashes,
+        hash_mode=hash_mode,
+        candidates=job_candidates,
+        timeout_seconds=timeout_seconds,
+        candidate_budget=len(job_candidates) if job_candidates else max(1, len(masks)),
+        session_dir=session_dir,
+        attack_mode=attack_mode,
+        rule_files=_string_tuple(parameters.get("hashcat_rule_files")),
+        inline_rules=_string_tuple(parameters.get("hashcat_inline_rules")),
+        masks=masks,
+        custom_charsets=_string_tuple(parameters.get("hashcat_custom_charsets")),
+    )
+
+
+def _hashcat_attack_mode(parameters: dict[str, Any]) -> int:
+    raw = parameters.get("hashcat_attack_mode")
+    if raw is not None:
+        try:
+            return int(raw)
+        except (TypeError, ValueError) as exc:
+            raise AppError(
+                "EXECUTION_FAILED",
+                "hashcat_attack_mode 必须为整数",
+                status_code=422,
+                details={"hashcat_attack_mode": raw},
+            ) from exc
+    if parameters.get("hashcat_masks"):
+        return 3
+    if parameters.get("hashcat_hybrid_mask"):
+        position = str(parameters.get("hashcat_hybrid_position", "right")).lower()
+        return 7 if position in {"left", "prefix"} else 6
+    return 0
+
+
+def _native_masks(
+    parameters: dict[str, Any],
+    candidates: tuple[str, ...],
+    attack_mode: int,
+) -> tuple[str, ...]:
+    if attack_mode == 3:
+        masks = _string_tuple(parameters.get("hashcat_masks")) or candidates
+    elif attack_mode in {6, 7}:
+        masks = _string_tuple(parameters.get("hashcat_hybrid_mask"))
+    else:
+        masks = ()
+    if attack_mode in {3, 6, 7} and not masks:
+        raise AppError(
+            "EXECUTION_FAILED",
+            "Hashcat 掩码/混合攻击缺少 mask",
+            status_code=422,
+            details={"attack_mode": attack_mode},
+        )
+    return masks
+
+
+def _string_tuple(value: object) -> tuple[str, ...]:
+    if value is None or value is False:
+        return ()
+    if isinstance(value, str):
+        raw = (value,)
+    elif isinstance(value, list | tuple):
+        raw = tuple(value)
+    else:
+        raise AppError(
+            "EXECUTION_FAILED",
+            "Hashcat 原生攻击参数必须为字符串或字符串列表",
+            status_code=422,
+            details={"type": type(value).__name__},
+        )
+    prepared: list[str] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, str) or not item or "\n" in item or "\r" in item:
+            raise AppError(
+                "EXECUTION_FAILED",
+                "Hashcat 原生攻击参数必须为非空单行文本",
+                status_code=422,
+                details={"index": index},
+            )
+        prepared.append(item)
+    return tuple(dict.fromkeys(prepared))

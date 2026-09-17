@@ -117,6 +117,11 @@ py -3.12 -m venv .venv
 `SAGE_HASHCAT_STREAM_BATCH_SIZE` 调整。会话使用稳定的 `--session`、
 `--restore-file-path` 和定期 restore 检查点；服务意外退出后可从 Hashcat
 检查点和 Generator 游标继续。正常结束后会删除该 run 的临时候选与会话文件。
+S2 可通过策略参数接入 Hashcat 原生攻击：`hashcat_rule_files` /
+`hashcat_inline_rules` 会以 `-r` 规则引擎运行词表种子；`hashcat_masks`
+会以 `-a 3` 掩码攻击运行；`hashcat_hybrid_mask` 配合
+`hashcat_hybrid_position` 会以 `-a 6/7` 混合攻击运行，掩码作为 Hashcat
+参数传递而不是在 Python 侧展开。
 
 S3 默认继续使用 `pcfg_lite`。要启用完整 PCFG，将 `SAGE_PCFG_VARIANT` 设为
 `pcfg_full`，并把 `SAGE_PCFG_RULESET_PATH` 指向 `pcfg_cracker` 训练器生成的

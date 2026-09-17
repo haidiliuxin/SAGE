@@ -24,6 +24,9 @@ CandidateSourceKind: TypeAlias = Literal[
     "personalized_combination",
     "combination",
     "transfer_pattern",
+    "hashcat_mask",
+    "hashcat_rule",
+    "hashcat_hybrid",
 ]
 
 

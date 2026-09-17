@@ -326,6 +326,11 @@ Mock（第一周链路，无需候选）：
 - `hashcat_mode`：可选。缺省时 Hash 任务由 `known_algorithm` 自动映射（bcrypt=3200、sha256=1400、zip-aes=13600 等），ZIP 任务默认 13600；无法确定时返回 `422`；
 - `timeout`：可选，覆盖策略时间预算的每策略秒数上限。
 
+策略参数可启用 Hashcat 原生规则/掩码/混合攻击而不在后端展开全部候选：
+`hashcat_rule_files` / `hashcat_inline_rules` 转为 `-r` 规则文件，
+`hashcat_masks` 转为 `--attack-mode 3`，`hashcat_hybrid_mask` 加
+`hashcat_hybrid_position=left|right` 转为 `--attack-mode 7|6`。
+
 返回：
 
 ```json
@@ -344,6 +349,7 @@ Mock（第一周链路，无需候选）：
 - S1 使用后端内置的有序 Baseline 候选；请求中可选的 `candidates` 会排在内置候选之前；
 - S2 以补充候选和 S1 基线为种子，只执行当前 `StrategyItem.parameters` 中值为 `true` 的规则；
 - S2 支持 `capitalize_first`、`all_upper`、`all_lower`、`common_number_suffix`、`year_suffix`、`common_substitution` 和 `symbol_suffix`；
+- S2 支持 Hashcat 原生 `-r`、mask（`-a 3`）与 hybrid（`-a 6/7`）参数；mask 单元作为紧凑候选流式调度，不在后端展开成完整明文空间；
 - S3 默认使用 `pcfg_lite` 的固定有限模板 `W`、`WY`、`WD`、`C`、`CY`、`CD`、`WS`、`CS`、`WYS`、`WDS` 和 `DW`，按模板概率降序生成；`max_templates`、`min_probability` 和 `max_structure_length` 分别控制模板数、概率阈值和最终候选长度；
 - 策略层级为 S1 Baseline、S2 Rule、S3 Statistical Model、S4 Personalized、S5 Transfer。S3 可配置 `pcfg_lite`、`pcfg_full`、`markov`；S4 默认按 I1/I2/I3 自动选择 `context`、`history`、`hybrid`；S5 使用 `pattern_knowledge`；
 - 后端设置 `SAGE_PCFG_VARIANT=pcfg_full` 且配置 `SAGE_PCFG_RULESET_PATH` 后，S3 改用 MIT 许可 `pcfg_cracker` 兼容 ruleset；HTTP 请求/响应不变，候选内部来源增加原概率和自然对数 `log_probability`；

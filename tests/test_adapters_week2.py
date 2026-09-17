@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import sys
 import time
 
@@ -180,6 +181,86 @@ def test_hashcat_job_requires_budget_above_zero(tmp_path, monkeypatch):
         )
     assert excinfo.value.status_code == 422
     assert excinfo.value.code == "BUDGET_EXCEEDED"
+
+
+def test_hashcat_rule_file_is_passed_as_native_rule_engine(tmp_path, monkeypatch):
+    log_path = tmp_path / "hashcat.jsonl"
+    rule_file = tmp_path / "demo.rule"
+    rule_file.write_text(":\n", encoding="utf-8")
+    adapter = fake_hashcat(
+        tmp_path,
+        monkeypatch,
+        FAKE_HASHCAT_LOG=str(log_path),
+        FAKE_HASHCAT_NO_RECOVER="1",
+    )
+
+    result = adapter.start(HashcatJob(
+        run_id="rule",
+        target_hashes=(TARGET,),
+        hash_mode=3200,
+        candidates=("seed",),
+        timeout_seconds=20,
+        candidate_budget=1,
+        rule_files=(str(rule_file),),
+    )).wait()
+
+    payload = json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])
+    assert result.status == TaskStatus.COMPLETED
+    assert payload["attack_mode"] == "0"
+    assert payload["rules"] == [str(rule_file)]
+
+
+def test_hashcat_mask_attack_uses_native_attack_mode(tmp_path, monkeypatch):
+    log_path = tmp_path / "mask.jsonl"
+    adapter = fake_hashcat(
+        tmp_path,
+        monkeypatch,
+        FAKE_HASHCAT_LOG=str(log_path),
+        FAKE_HASHCAT_NO_RECOVER="1",
+    )
+
+    result = adapter.start(HashcatJob(
+        run_id="mask",
+        target_hashes=(TARGET,),
+        hash_mode=3200,
+        candidates=(),
+        timeout_seconds=20,
+        candidate_budget=1,
+        attack_mode=3,
+        masks=("?l?l?d?d",),
+    )).wait()
+
+    payload = json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])
+    assert result.status == TaskStatus.COMPLETED
+    assert result.tested == 1
+    assert payload["attack_mode"] == "3"
+    assert payload["masks"] == ["?l?l?d?d"]
+
+
+def test_hashcat_hybrid_attack_places_wordlist_and_mask(tmp_path, monkeypatch):
+    log_path = tmp_path / "hybrid.jsonl"
+    adapter = fake_hashcat(
+        tmp_path,
+        monkeypatch,
+        FAKE_HASHCAT_LOG=str(log_path),
+        FAKE_HASHCAT_NO_RECOVER="1",
+    )
+
+    result = adapter.start(HashcatJob(
+        run_id="hybrid",
+        target_hashes=(TARGET,),
+        hash_mode=3200,
+        candidates=("seed",),
+        timeout_seconds=20,
+        candidate_budget=1,
+        attack_mode=6,
+        masks=("?d?d",),
+    )).wait()
+
+    payload = json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])
+    assert result.status == TaskStatus.COMPLETED
+    assert payload["attack_mode"] == "6"
+    assert payload["masks"] == ["?d?d"]
 
 
 # ------------------------------------------------------------ zip2john 适配器
