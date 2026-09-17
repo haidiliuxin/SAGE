@@ -28,7 +28,7 @@ SAGE-Pass 是面向异构离线口令安全评测任务的智能策略编排系�
 - Generator Registry：注册 `baseline`、`rule`、`pcfg_lite`、`pcfg_full`、`markov`、`context`、`history`、`hybrid`、`pattern_knowledge`（并保留 `transfer` 兼容名），统一使用可分批、可快照恢复的运行状态；候选管线只负责按优先级调度、跨生成器稳定去重、预算截断和 Hashcat 输入约束；
 - 策略执行统计：同一策略的多个 Hashcat 批次共享时间预算，累计 `tested`、`recovered`、耗时和成功率；
 - 执行控制（第 3 周）：分批执行的**暂停/继续/取消**与实时状态（`paused`）；Mock 暂停冻结进度，Real 在候选批次边界暂停、继续后恢复；
-- 持久化与断点续跑（第 3 周甲后）：真实运行以 `RunRecordModel` 落库目标/计划/候选批次与逐批进度/Bandit 统计检查点，服务重启后自动从断点续跑（跳过已消费批次）；其余残留 `running/paused` 任务由启动收尾避免状态悬挂；
+- 持久化与断点续跑（第 3 周甲后）：真实运行以 `RunRecordModel` 落库目标、计划、候选流游标、去重 digest 索引与逐批进度/Bandit 统计检查点，服务重启后自动从断点续跑（跳过已消费批次）；其余残留 `running/paused` 任务由启动收尾避免状态悬挂；
 - Bandit Scheduler（第 3 周）：把目标组与策略作为 Arm，先按计划优先级各探索一个候选批次，再根据成功概率、近期收益、计划先验和时间成本评分选择下一批；
 - Feedback Engine v2：completed 真实 run 自动抽取长度、字符类别、结构签名、数字位置、抽象前后缀、大小写、年份和常见替换，以事务和唯一 run 标记幂等聚合跨任务 Pattern Knowledge；
 - S5 Transfer：达到最低观察数和任务数的同作用域模式可作用于当前任务授权种子，生成有界、可解释、稳定去重的迁移候选；历史恢复明文不会写入 Pattern Knowledge，也不会发送给 LLM；
@@ -111,6 +111,12 @@ py -3.12 -m venv .venv
 默认数据库为 `data/sage_pass.db`，上传目录为 `data/uploads/`。配置项见 `.env.example`。
 
 真实执行需在本机提供 Hashcat（ZIP 目标另需 zip2john），通过 `SAGE_HASHCAT_PATH` / `SAGE_ZIP2JOHN_PATH` 配置；未配置时 mock 链路不受影响，真实执行返回清晰的 `503` 提示。
+
+真实执行使用按需候选流：启动 run 时只建立 Generator 游标，调度器选中 Arm 后
+才生成候选。默认每个 Hashcat 会话最多拉取 100000 条，可通过
+`SAGE_HASHCAT_STREAM_BATCH_SIZE` 调整。会话使用稳定的 `--session`、
+`--restore-file-path` 和定期 restore 检查点；服务意外退出后可从 Hashcat
+检查点和 Generator 游标继续。正常结束后会删除该 run 的临时候选与会话文件。
 
 S3 默认继续使用 `pcfg_lite`。要启用完整 PCFG，将 `SAGE_PCFG_VARIANT` 设为
 `pcfg_full`，并把 `SAGE_PCFG_RULESET_PATH` 指向 `pcfg_cracker` 训练器生成的

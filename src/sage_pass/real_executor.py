@@ -9,7 +9,11 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from .candidate_generator import CandidateBatch, CandidateGenerator
+from .candidate_generator import (
+    CandidateBatch,
+    CandidateGenerator,
+    CandidatePlanStream,
+)
 from .candidate_types import CandidateRecord
 from .config import Settings
 from .enums import ExecutionMode, SchedulerType, StrategyId, TargetType, TaskStatus
@@ -65,7 +69,7 @@ from .zip_adapter import ZipHashExtractor
 from .transfer import load_transfer_knowledge
 
 ZIP_EXTRACTION_TIMEOUT = 30.0
-RUN_SNAPSHOT_SCHEMA_VERSION = 2
+RUN_SNAPSHOT_SCHEMA_VERSION = 3
 LOGGER = logging.getLogger(__name__)
 
 _TERMINAL_STATUSES = frozenset(
@@ -124,6 +128,7 @@ class _RunState:
     research: ResearchRecorder | None = None
     research_previous_arm: str | None = None
     research_stop_reason: str | None = None
+    candidate_stream: CandidatePlanStream | None = None
 
 
 class RealExecutor:
@@ -318,6 +323,7 @@ class RealExecutor:
         started_at = now_iso()
         run_id = public_id("R")
         batches_by_strategy: dict[str, list[CandidateBatch]] = {}
+        candidate_stream: CandidatePlanStream | None = None
         prir_model = PRIRRepository(session).get(task.task_id)
         transfer_patterns, knowledge_summary = load_transfer_knowledge(
             PatternKnowledgeRepository(session),
@@ -327,16 +333,26 @@ class RealExecutor:
             config=self.feedback_config,
         )
         try:
-            for batch in self.candidate_generator.iter_plan_batches(
-                plan,
-                supplied_candidates=payload.candidates,
-                task_context=task.context,
-                historical_passwords=task.historical_passwords,
-                transfer_patterns=transfer_patterns,
-            ):
-                batches_by_strategy.setdefault(
-                    batch.strategy_id.value, []
-                ).append(batch)
+            if hasattr(self.candidate_generator, "open_plan_stream"):
+                candidate_stream = self.candidate_generator.open_plan_stream(
+                    plan,
+                    supplied_candidates=payload.candidates,
+                    task_context=task.context,
+                    historical_passwords=task.historical_passwords,
+                    transfer_patterns=transfer_patterns,
+                    max_candidates=task.candidate_budget,
+                )
+            else:  # Compatibility for injected legacy candidate providers.
+                for batch in self.candidate_generator.iter_plan_batches(
+                    plan,
+                    supplied_candidates=payload.candidates,
+                    task_context=task.context,
+                    historical_passwords=task.historical_passwords,
+                    transfer_patterns=transfer_patterns,
+                ):
+                    batches_by_strategy.setdefault(
+                        batch.strategy_id.value, []
+                    ).append(batch)
         except (ValueError, GeneratorRegistryError) as exc:
             raise AppError(
                 "EXECUTION_FAILED",
@@ -354,7 +370,11 @@ class RealExecutor:
             candidate_record_batches = tuple(
                 batch.records for batch in generated_batches
             )
-            expected += sum(len(batch) for batch in candidate_batches)
+            expected += (
+                item.candidate_budget
+                if candidate_stream is not None
+                else sum(len(batch) for batch in candidate_batches)
+            )
             strategies.append(
                 _StrategyState(
                     strategy_id=item.strategy_id.value,
@@ -364,7 +384,9 @@ class RealExecutor:
                     candidate_budget=item.candidate_budget,
                     parameters=item.parameters,
                     generator_id=(
-                        generated_batches[0].generator_id
+                        candidate_stream.generator_id(item.strategy_id)
+                        if candidate_stream is not None
+                        else generated_batches[0].generator_id
                         if generated_batches
                         and generated_batches[0].generator_id
                         else STRATEGY_GENERATOR_IDS[item.strategy_id]
@@ -378,6 +400,7 @@ class RealExecutor:
                     ),
                 )
             )
+        expected = min(expected, task.candidate_budget)
         if expected == 0:
             raise AppError(
                 "EXECUTION_FAILED",
@@ -403,6 +426,10 @@ class RealExecutor:
                 item.strategy_id: item.transfer_score for item in strategies
             },
             scheduler_type=self.settings.scheduler_type.value,
+            candidate_stream=(
+                candidate_stream.snapshot()
+                if candidate_stream is not None else None
+            ),
         )
         # Freeze reward configuration with the run; a later service default
         # must not change the interpretation of resumed batches.
@@ -462,6 +489,7 @@ class RealExecutor:
             started_at=started_at,
             expected_candidates=expected,
             scheduler=scheduler,
+            candidate_stream=candidate_stream,
         )
         with self._lock:
             self._registry[run_id] = state
@@ -726,6 +754,19 @@ class RealExecutor:
                         state.task_id,
                         type(exc).__name__,
                     )
+            if persisted and state.candidate_stream is not None and hasattr(
+                self.hashcat, "cleanup_run_sessions"
+            ):
+                try:
+                    self.hashcat.cleanup_run_sessions(
+                        self.settings.upload_dir.parent / "hashcat-sessions",
+                        state.run_id,
+                    )
+                except OSError:
+                    LOGGER.warning(
+                        "hashcat session cleanup failed for run_id=%s",
+                        state.run_id,
+                    )
 
     def _execute_strategies(self, state: _RunState) -> None:
         scheduler = state.scheduler
@@ -741,7 +782,10 @@ class RealExecutor:
             if state.cancel_requested:
                 self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
                 return
-            next_batch_sizes = _next_batch_sizes(state.strategies)
+            next_batch_sizes = _next_batch_sizes(
+                state,
+                self.settings.hashcat_stream_batch_size,
+            )
             prior_state = scheduler.snapshot_statistics()
             diagnostics = decision_diagnostics(scheduler, next_batch_sizes)
             decision = scheduler.select(next_batch_sizes)
@@ -753,9 +797,17 @@ class RealExecutor:
                 return
 
             item = by_strategy[decision.strategy_id]
-            source_batch = item.candidate_batches[item.next_batch_index]
-            candidates = source_batch[: decision.candidate_limit]
-            item.next_batch_index += 1
+            if state.candidate_stream is not None:
+                candidate_batch = state.candidate_stream.pull(
+                    item.strategy_id, decision.candidate_limit
+                )
+                candidates = candidate_batch.candidates
+                if not candidates:
+                    continue
+            else:
+                source_batch = item.candidate_batches[item.next_batch_index]
+                candidates = source_batch[: decision.candidate_limit]
+                item.next_batch_index += 1
             item.scheduled_batches += 1
             state.round_index += 1
             prior_scores = {key: value.score for key, value in diagnostics["scores"].items()}
@@ -779,6 +831,12 @@ class RealExecutor:
                         candidates=candidates,
                         timeout_seconds=decision.time_limit,
                         candidate_budget=len(candidates),
+                        session_dir=(str(
+                            self.settings.upload_dir.parent
+                            / "hashcat-sessions"
+                            / state.run_id
+                            / f"{item.strategy_id}-{item.scheduled_batches}"
+                        ) if state.candidate_stream is not None else None),
                     )
                 )
             except AppError as exc:
@@ -907,7 +965,9 @@ class RealExecutor:
         reason = stop_reason or (
             "cancelled" if state.cancel_requested or outcome.status == TaskStatus.CANCELLED else
             "execution_failed" if outcome.status == TaskStatus.FAILED else
-            state.scheduler.stop_reason(_next_batch_sizes(state.strategies))
+            state.scheduler.stop_reason(_next_batch_sizes(
+                state, self.settings.hashcat_stream_batch_size
+            ))
         )
         logged = state.research.complete(
             outcome, updated_state=state.scheduler.snapshot_statistics(),
@@ -1058,6 +1118,17 @@ class RealExecutor:
         scheduler = _scheduler_from_snapshot(
             snapshot, progress, strategies
         )
+        stream_snapshot = (
+            progress.get("candidate_stream")
+            or snapshot.get("candidate_stream")
+        )
+        candidate_stream = None
+        if stream_snapshot is not None:
+            if not isinstance(stream_snapshot, dict):
+                raise ValueError("candidate_stream 快照无效")
+            candidate_stream = self.candidate_generator.restore_plan_stream(
+                stream_snapshot
+            )
         state = _RunState(
             run_id=run_id,
             task_id=task_id,
@@ -1073,6 +1144,7 @@ class RealExecutor:
                 "round_index", sum(item.consumed_batches for item in strategies)
             )),
             research_previous_arm=progress.get("research_previous_arm"),
+            candidate_stream=candidate_stream,
         )
         with self._lock:
             self._registry[run_id] = state
@@ -1124,7 +1196,7 @@ class RealExecutor:
                 continue
             item.status = TaskStatus.COMPLETED.value
             item.finished_at = finished_at
-            if not item.candidate_batches:
+            if item.tested == 0:
                 item.message = "该策略未生成候选，无需执行"
             elif reason == SchedulerStopReason.TIME_BUDGET:
                 item.message = "已达到任务时间预算"
@@ -1325,8 +1397,9 @@ def _serialize_snapshot(
     total_candidate_budget: int,
     transfer_scores: dict[str, float | None] | None = None,
     scheduler_type: str = SchedulerType.HEURISTIC_BANDIT.value,
+    candidate_stream: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """启动时写入运行记录的静态快照（目标、计划、候选批次等）。"""
+    """Write static metadata; v3 stores stream state instead of all candidates."""
     return {
         "schema_version": RUN_SNAPSHOT_SCHEMA_VERSION,
         "targets": list(targets),
@@ -1334,6 +1407,7 @@ def _serialize_snapshot(
         "expected_candidates": expected,
         "timeout_override": payload.timeout,
         "scheduler_type": scheduler_type,
+        "candidate_stream": candidate_stream,
         "plan": {
             "total_time_budget": plan.total_time_budget,
             "total_candidate_budget": total_candidate_budget,
@@ -1384,6 +1458,7 @@ def _initial_progress(
             for entry in snapshot["plan"]["strategies"]
         },
         "scheduler_stats": {},
+        "candidate_stream": snapshot.get("candidate_stream"),
     }
 
 
@@ -1408,6 +1483,10 @@ def _serialize_progress(state: _RunState) -> dict[str, Any]:
             for item in state.strategies
         },
         "scheduler_stats": scheduler_stats,
+        "candidate_stream": (
+            state.candidate_stream.snapshot()
+            if state.candidate_stream is not None else None
+        ),
         "scheduler_snapshot": state.scheduler.snapshot() if state.scheduler is not None else None,
         "round_index": state.round_index,
         "research_previous_arm": state.research_previous_arm,
@@ -1468,16 +1547,16 @@ def _state_from_snapshot(
 
 
 def _validate_snapshot_version(snapshot: dict[str, Any]) -> int:
-    """Accept legacy unversioned/v1 records and the registry-backed v2."""
+    """Accept legacy v1/v2 materialized records and v3 stream records."""
     raw = snapshot.get("schema_version", 1)
     try:
         version = int(raw)
     except (TypeError, ValueError) as exc:
         raise ValueError("运行快照 schema_version 无效") from exc
-    if version not in {1, RUN_SNAPSHOT_SCHEMA_VERSION}:
+    if version not in {1, 2, RUN_SNAPSHOT_SCHEMA_VERSION}:
         raise ValueError(
             f"不支持的运行快照版本 {version}；"
-            f"当前支持 1 和 {RUN_SNAPSHOT_SCHEMA_VERSION}"
+            f"当前支持 1、2 和 {RUN_SNAPSHOT_SCHEMA_VERSION}"
         )
     return version
 
@@ -1612,12 +1691,16 @@ def _strategy_result_time(item: _StrategyState) -> float:
 
 
 def _next_batch_sizes(
-    strategies: list[_StrategyState],
-) -> dict[str, int]:    return {
+    state: _RunState,
+    stream_batch_size: int,
+) -> dict[str, int]:
+    if state.candidate_stream is not None:
+        return state.candidate_stream.next_sizes(stream_batch_size)
+    return {
         item.strategy_id: (
             len(item.candidate_batches[item.next_batch_index])
             if item.next_batch_index < len(item.candidate_batches)
             else 0
         )
-        for item in strategies
+        for item in state.strategies
     }

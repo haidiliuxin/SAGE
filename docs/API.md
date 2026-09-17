@@ -211,7 +211,7 @@ paused   -> running | completed | failed | cancelled
 
 **暂停/继续（第 3 周）**：`running` 任务可 `PATCH {"status":"paused"}` 暂停，`paused` 任务可 `PATCH {"status":"running"}` 继续，或 `PATCH {"status":"cancelled"}` 取消。Mock 执行在暂停期间冻结进度；真实执行在**候选批次边界**暂停（当前批次结束后进入 `paused`，运行状态消息会先提示“等待当前批次结束”），继续后从下一批候选恢复。取消会同步停止底层 Hashcat 进程（含暂停中取消）。
 
-**异常恢复（第 3 周）**：真实执行每次启动都会写入 `RunRecordModel`（目标、计划、候选批次、逐批进度与调度统计检查点）。服务重启后，处于 `running/paused` 的真实运行会自动从断点续跑（跳过已消费批次，至多整批重跑一次正在执行的那一批）；其余无运行记录的残留任务仍由启动收尾（全部策略行已完成则任务置为 `completed`，否则置为 `failed`），避免状态悬挂。暂停状态在重启后被自动继续。
+**异常恢复（第 3 周）**：真实执行每次启动都会写入 `RunRecordModel`（目标、计划、候选流游标、去重 digest 索引、逐批进度与调度统计检查点）。服务重启后，处于 `running/paused` 的真实运行会自动从断点续跑（跳过已消费批次，至多整批重跑一次正在执行的那一批）；其余无运行记录的残留任务仍由启动收尾（全部策略行已完成则任务置为 `completed`，否则置为 `failed`），避免状态悬挂。暂停状态在重启后被自动继续。
 
 ## Analyzer 与 Planner
 
@@ -467,6 +467,7 @@ Pattern Knowledge 的作用域为 `target_type + algorithm`，只保存长度、
 | 变量 | 说明 | 默认 |
 | --- | --- | --- |
 | `SAGE_HASHCAT_PATH` | hashcat 可执行文件路径或命令名 | `hashcat` |
+| `SAGE_HASHCAT_STREAM_BATCH_SIZE` | 每个长生命周期 Hashcat 会话按需拉取的最大候选数 | `100000` |
 | `SAGE_ZIP2JOHN_PATH` | zip2john 可执行文件路径或命令名 | `zip2john` |
 | `SAGE_S3_GENERATOR` | S3 具体生成器：`pcfg_lite` / `pcfg_full` / `markov` | `pcfg_lite` |
 | `SAGE_S4_GENERATOR` | S4 具体生成器：`auto` / `context` / `history` / `hybrid` | `auto` |

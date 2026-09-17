@@ -72,6 +72,11 @@ class Settings:
     pdf2john_path: str = "pdf2john"
     office2john_path: str = "office2john"
     extraction_timeout_seconds: float = 30.0
+    hashcat_stream_batch_size: int = 100_000
+
+    def __post_init__(self) -> None:
+        if self.hashcat_stream_batch_size <= 0:
+            raise ValueError("hashcat_stream_batch_size 必须大于 0")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -153,5 +158,8 @@ class Settings:
             ),
             extraction_timeout_seconds=float(
                 os.getenv("SAGE_EXTRACTION_TIMEOUT_SECONDS", "30")
+            ),
+            hashcat_stream_batch_size=int(
+                os.getenv("SAGE_HASHCAT_STREAM_BATCH_SIZE", "100000")
             ),
         )
