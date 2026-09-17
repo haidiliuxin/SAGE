@@ -40,6 +40,7 @@ from .schemas import (
     TaskStatusUpdate,
 )
 from .feedback import FeedbackConfig
+from .information import build_information_profile
 from .transfer import KnowledgeSummary, load_transfer_knowledge
 from .service import (
     create_task,
@@ -84,6 +85,16 @@ def _plan_with_knowledge(planner, prir: PRIR, summary: KnowledgeSummary):
     if "knowledge_summary" in parameters:
         return planner.plan(prir, knowledge_summary=summary)
     return planner.plan(prir)
+
+
+def _attach_information_profile(task, prir: PRIR, summary: KnowledgeSummary) -> PRIR:
+    detail = task_to_schema(task)
+    profile = build_information_profile(
+        detail.context,
+        detail.historical_passwords,
+        has_pattern_knowledge=summary.available,
+    )
+    return prir.model_copy(update={"information_profile": profile})
 
 
 @router.post(
@@ -207,7 +218,10 @@ def analyze_task(
     if current == TaskStatus.ANALYZED:
         existing = PRIRRepository(session).get(task_id)
         if existing is not None:
-            return prir_to_schema(existing)
+            return prir_to_schema(
+                existing,
+                information_profile=task_to_schema(task).information_profile,
+            )
     if current != TaskStatus.CREATED:
         raise AppError(
             "INVALID_TASK",
@@ -255,6 +269,7 @@ def plan_task(
         )
     prir = prir_to_schema(prir_model)
     _, knowledge_summary = _knowledge_for_prir(request, session, prir)
+    prir = _attach_information_profile(task, prir, knowledge_summary)
     plan = _plan_with_knowledge(request.app.state.planner, prir, knowledge_summary)
     if current == TaskStatus.ANALYZED:
         update_task_status(session, task, TaskStatus.PLANNED)
@@ -292,6 +307,7 @@ def execute_task(
         )
     prir = prir_to_schema(prir_model)
     _, knowledge_summary = _knowledge_for_prir(request, session, prir)
+    prir = _attach_information_profile(task, prir, knowledge_summary)
     plan = _plan_with_knowledge(request.app.state.planner, prir, knowledge_summary)
     task_detail = task_to_schema(task)
     if payload.mode == ExecutionMode.REAL:

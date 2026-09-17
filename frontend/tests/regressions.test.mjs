@@ -24,7 +24,7 @@ async function loadSource(relativePath) {
 }
 
 const { default: App } = await loadSource('../src/App.tsx')
-const { parseContextLists } = await loadSource('../src/context-input.ts')
+const { parseContextLists, parseHistoricalPasswords } = await loadSource('../src/context-input.ts')
 const { ResearchPanel, TaskRuns } = await loadSource('../src/ResearchPanel.tsx')
 
 function text(node) {
@@ -127,6 +127,12 @@ test('parse comma-separated context only at submission, accepting empty fields',
   for (const invalid of ['202x', '2024.5', 'Infinity', '-1', '0', '9007199254740993']) {
     assert.throws(() => parseContextLists('', invalid), /相关年份/)
   }
+})
+
+test('historical passwords use newline boundaries and preserve password text', () => {
+  assert.deepEqual(parseHistoricalPasswords('old,with,commas\n second value \nold,with,commas'), [
+    'old,with,commas', ' second value ',
+  ])
 })
 
 test('component retains typed separators and submits separate keywords and years', async (t) => {

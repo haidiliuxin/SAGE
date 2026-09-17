@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sage-pass"
-version = "0.5.0"
+version = "0.6.0"
 description = "SAGE-Pass intelligent password security assessment orchestration service"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -25,6 +25,9 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"sage_pass._vendor.pcfg_cracker" = ["LICENSE", "NOTICE.md"]
 
 [tool.pytest.ini_options]
 addopts = "-q -p no:cacheprovider"

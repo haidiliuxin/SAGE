@@ -96,6 +96,19 @@ def iter_context_candidates(
         shortened = _strip_organization_suffix(context.organization)
         if shortened != context.organization:
             _append_term(bases, "organization", shortened)
+    if options["use_keywords"]:
+        for original in (
+            context.name,
+            context.nickname,
+            context.username,
+            context.email_local_part,
+            context.phone_suffix,
+            context.birthday,
+            *context.interest_words,
+            *context.authorized_keywords,
+        ):
+            if original:
+                _append_term(bases, "keyword", str(original))
 
     derived: list[tuple[str, CandidateSource]] = []
     if options["use_pinyin"]:
@@ -117,11 +130,16 @@ def iter_context_candidates(
                     normalized=short,
                 )))
 
+    raw_years = list(context.years)
+    if context.birth_year is not None:
+        raw_years.append(context.birth_year)
+    if context.birthday:
+        raw_years.extend(int(item) for item in re.findall(r"(?:19|20)\d{2}", context.birthday))
     years = [
         (str(year), CandidateSource(
             kind="year", original=str(year), normalized=str(year)
         ))
-        for year in context.years
+        for year in dict.fromkeys(raw_years)
     ] if options["use_years"] else []
 
     emitted: dict[str, CandidateRecord] = {}

@@ -2,6 +2,14 @@ function splitItems(text: string): string[] {
   return text.split(/[,，]/).map((item) => item.trim()).filter(Boolean)
 }
 
+export function parseTermList(text: string): string[] {
+  return splitItems(text)
+}
+
+export function parseHistoricalPasswords(text: string): string[] {
+  return [...new Set(text.split(/\r?\n/).filter((item) => item.length > 0))]
+}
+
 // Parse only at submission: do not remove separators or rewrite text while typing.
 export function parseContextLists(keywordText: string, yearText: string) {
   const years = splitItems(yearText).map((item) => {

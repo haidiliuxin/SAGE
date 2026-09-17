@@ -9,6 +9,7 @@ SAGE-Pass 是面向异构离线口令安全评测任务的智能策略编排系�
 - FastAPI 应用工厂、健康检查、CORS 和统一错误响应；
 - SQLAlchemy 数据库模型：`TaskModel`、`PRIRModel`、`StrategyRunModel`、`FileModel`；
 - Pydantic 公共契约：Task、PRIR、StrategyPlan、执行状态与结果；
+- I0～I3 信息场景与统一 `InformationProfile`：个人信息支持姓名/昵称、用户名、邮箱局部、电话后缀、生日/年份、地区、组织、兴趣词和其他授权关键词；历史旧口令由独立 `historical_passwords` 输入，Planner 与任务详情只接收脱敏摘要；
 - 任务创建、列表、详情、受控状态更新 API；
 - 文件上传与元数据查询 API，任务之间只传 `file_id`；
 - Analyzer：支持 Hash 文本和 ZIP/PDF/Office 元数据输入，ZIP 经 zip2john 真实解析（无工具时降级提示），生成并持久化 PRIR；
@@ -21,15 +22,18 @@ SAGE-Pass 是面向异构离线口令安全评测任务的智能策略编排系�
 - Real Executor：`mode: real` 按 Bandit 选择候选批次运行 Hashcat，写回 `StrategyRunModel` 并把任务推进到终态，运行中可暂停、继续或取消；
 - S1 Baseline：后端生成有序基础候选，并支持请求方提供可选的高优先级补充候选；
 - S2 Rule：根据计划参数执行首字母大写、全大写/小写、数字/年份/符号后缀及常见字符替换；
-- S3 PCFG-lite：按有限结构模板概率稳定展开词、年份、数字和符号组合；
-- S4 Context：规范化关键词，派生拼音与缩写，并组合任务年份、地区和组织词；
-- 候选管线：为候选保留策略和来源元数据，跨策略稳定去重、按策略候选预算截断、每批 1000 条输出，并保证 Hashcat 单行输入约束；
+- S3 PCFG：默认 `pcfg_lite` 按有限结构模板展开；可切换到基于 MIT 许可 `lakiw/pcfg_cracker` 的 `pcfg_full`，加载兼容 ruleset 后按概率流式生成，并输出 `log_probability`；
+- S3 Markov：可选 `markov` 生成器复用 `pcfg_cracker` 内置的 MIT 许可 OMEN，实现可配置阶数校验、按 OMEN level 排序、流式批次和游标恢复；
+- S4 Personalized：按信息场景自动选择 `context`、`history` 或 `hybrid`，组合授权个人信息、当前用户旧口令结构与 Pattern Knowledge；
+- Generator Registry：注册 `baseline`、`rule`、`pcfg_lite`、`pcfg_full`、`markov`、`context`、`history`、`hybrid`、`pattern_knowledge`（并保留 `transfer` 兼容名），统一使用可分批、可快照恢复的运行状态；候选管线只负责按优先级调度、跨生成器稳定去重、预算截断和 Hashcat 输入约束；
 - 策略执行统计：同一策略的多个 Hashcat 批次共享时间预算，累计 `tested`、`recovered`、耗时和成功率；
 - 执行控制（第 3 周）：分批执行的**暂停/继续/取消**与实时状态（`paused`）；Mock 暂停冻结进度，Real 在候选批次边界暂停、继续后恢复；
 - 持久化与断点续跑（第 3 周甲后）：真实运行以 `RunRecordModel` 落库目标/计划/候选批次与逐批进度/Bandit 统计检查点，服务重启后自动从断点续跑（跳过已消费批次）；其余残留 `running/paused` 任务由启动收尾避免状态悬挂；
 - Bandit Scheduler（第 3 周）：把目标组与策略作为 Arm，先按计划优先级各探索一个候选批次，再根据成功概率、近期收益、计划先验和时间成本评分选择下一批；
 - Feedback Engine v2：completed 真实 run 自动抽取长度、字符类别、结构签名、数字位置、抽象前后缀、大小写、年份和常见替换，以事务和唯一 run 标记幂等聚合跨任务 Pattern Knowledge；
 - S5 Transfer：达到最低观察数和任务数的同作用域模式可作用于当前任务授权种子，生成有界、可解释、稳定去重的迁移候选；历史恢复明文不会写入 Pattern Knowledge，也不会发送给 LLM；
+- History Generator：仅处理当前任务授权旧口令，生成大小写、年份、数字、符号、字符替换、词根和历史结构迁移候选，来源展示不含旧口令原文；
+- Hybrid Generator：组合个人信息词根、历史结构、当前年份、组织/地区与抽象 Pattern Knowledge；
 - 迁移评分：S5 的 `transfer_score` 综合模式置信度、频次、任务覆盖和时效性后传入既有 `ArmSpec`，Bandit 评分公式和首轮探索语义保持不变；
 - 只读知识 API：`GET /api/feedback/patterns` 支持作用域、模式类型、最低置信度和数量过滤，不返回恢复明文、Hash 或文件内容；
 - Feedback Engine v2：提取长度、字符类别、结构签名、数字位置、抽象前后缀、大小写、年份和常见替换；通过 `feedback_runs` 保证重复 finalize 幂等，并在同一事务中更新 Pattern Knowledge；
@@ -108,6 +112,29 @@ py -3.12 -m venv .venv
 
 真实执行需在本机提供 Hashcat（ZIP 目标另需 zip2john），通过 `SAGE_HASHCAT_PATH` / `SAGE_ZIP2JOHN_PATH` 配置；未配置时 mock 链路不受影响，真实执行返回清晰的 `503` 提示。
 
+S3 默认继续使用 `pcfg_lite`。要启用完整 PCFG，将 `SAGE_PCFG_VARIANT` 设为
+`pcfg_full`，并把 `SAGE_PCFG_RULESET_PATH` 指向 `pcfg_cracker` 训练器生成的
+ruleset 目录（目录内应含 `config.ini`、`Grammar/`、`Alpha/` 等）。SAGE 不附带
+RockYou 或其派生默认模型；ruleset 应由授权数据训练或由使用者合法提供。
+`pcfg_full` 仅运行 PCFG 部分；OMEN/Markov 通过独立 `markov` 生成器启用。
+
+使用三阶 Markov/OMEN：
+
+```text
+SAGE_S3_GENERATOR=markov
+SAGE_MARKOV_RULESET_PATH=D:\path\to\pcfg_cracker\Rules\MyRuleset\Omen
+SAGE_MARKOV_ORDER=3
+```
+
+这里的三阶表示“根据前 3 个字符预测下一字符”，对应 OMEN 模型配置
+`ngram = 4`。阶数由训练决定，运行时配置必须与模型一致。候选按 OMEN
+level 从低到高输出，`CandidateSource.score` 保存该 level；level 越低表示
+模型认为候选越可能。模型内容不写入运行快照。
+
+S4 默认使用 `auto` 路由：只有个人信息时使用 `context`，只有历史旧口令时
+使用 `history`，两者同时存在时使用 `hybrid`。调试或消融时可通过
+`SAGE_S4_GENERATOR=context|history|hybrid` 固定具体生成器。
+
 启用 LLM Planner：
 
 ```text
@@ -153,6 +180,8 @@ src/sage_pass/
   policy.py          LLM 策略计划白名单与安全约束校验
   candidate_types.py  候选值与来源元数据
   pcfg_lite.py        S3 有限概率模板及惰性展开
+  generators/pcfg_full.py  开源 PCFG ruleset 的流式、可恢复适配器
+  generators/markov.py  三阶 OMEN Markov 模型加载、排序与流式适配器
   context.py          S4 规范化、拼音、缩写与上下文组合
   candidate_generator.py  S1～S5 候选生成、去重、预算与批次输出
   patterns.py        确定性口令结构抽取（仅产生抽象特征）

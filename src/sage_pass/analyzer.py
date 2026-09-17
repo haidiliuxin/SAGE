@@ -7,10 +7,11 @@ from sqlalchemy.orm import Session
 
 from .enums import TargetType, TaskStatus, VerificationCost
 from .errors import AppError
+from .information import build_information_profile
 from .hashcat_adapter import normalize_algorithm_name
 from .models import PRIRModel
 from .repository import FileRepository, PRIRRepository
-from .schemas import PRIR, TaskContext, TaskDetail
+from .schemas import InformationProfile, PRIR, TaskContext, TaskDetail
 from .service import now_iso
 from .zip_adapter import ZipHashExtractor
 
@@ -42,25 +43,34 @@ class MockAnalyzer:
             office_extractor=self.office_extractor,
             upload_dir=self.upload_dir,
         )
+        information_profile = build_information_profile(
+            task.context, task.historical_passwords
+        )
         prir = PRIR(
             task_id=task.task_id,
             target_type=task.target.type,
             algorithm=algorithm,
             salt=salt,
             verification_cost=cost,
-            context_available=_has_context(task.context),
+            context_available=(
+                information_profile.has_personal_information
+                or information_profile.has_historical_passwords
+            ),
             candidate_space=None,
             time_budget=task.time_budget,
             candidate_budget=task.candidate_budget,
             status=TaskStatus.ANALYZED,
             confidence=confidence,
             warnings=warnings,
+            information_profile=information_profile,
         )
         _save_prir(self.session, prir)
         return prir
 
 
-def prir_to_schema(item: PRIRModel) -> PRIR:
+def prir_to_schema(
+    item: PRIRModel, *, information_profile: InformationProfile | None = None
+) -> PRIR:
     return PRIR(
         task_id=item.task_id,
         target_type=item.target_type,
@@ -74,6 +84,7 @@ def prir_to_schema(item: PRIRModel) -> PRIR:
         status=item.status,
         confidence=item.confidence,
         warnings=item.warnings,
+        information_profile=information_profile,
     )
 
 
@@ -111,6 +122,15 @@ def _has_context(context: TaskContext) -> bool:
             context.years,
             context.region,
             context.organization,
+            context.name,
+            context.nickname,
+            context.username,
+            context.email_local_part,
+            context.phone_suffix,
+            context.birthday,
+            context.birth_year,
+            context.interest_words,
+            context.authorized_keywords,
         ]
     )
 

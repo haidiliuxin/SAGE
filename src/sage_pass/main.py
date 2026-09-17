@@ -64,12 +64,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     application = FastAPI(
         title="SAGE-Pass API",
-        version="0.5.0",
+        version="0.6.0",
         description=(
             "面向异构离线口令安全评测任务的编排 API。支持 mock 与基于 "
-            "Hashcat 的真实执行（第二周），并接入 WinZip AES（$zip2$）"
-            "加密 ZIP 目标、可配置的 LLM 策略规划，以及只保存抽象结构的 "
-            "Feedback Engine v2 与 S5 迁移策略。"
+            "Hashcat 的真实执行，并接入 WinZip AES（$zip2$）、PDF 与 Office "
+            "加密目标、可配置的 LLM 策略规划、只保存抽象结构的 Feedback "
+            "Engine v2 与 S5 迁移策略、B 侧的 UCB 成本感知调度与离线回放，"
+            "以及 C 侧的信息场景（I0～I3）、脱敏 InformationProfile 与"
+            "统一生成器注册表（PCFG / Markov / history / hybrid）。"
         ),
         lifespan=lifespan,
     )

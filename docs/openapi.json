@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "SAGE-Pass API",
-    "description": "面向异构离线口令安全评测任务的编排 API。支持 mock 与基于 Hashcat 的真实执行（第二周），并接入 WinZip AES（$zip2$）加密 ZIP 目标、可配置的 LLM 策略规划，以及只保存抽象结构的 Feedback Engine v2 与 S5 迁移策略。",
-    "version": "0.5.0"
+    "description": "面向异构离线口令安全评测任务的编排 API。支持 mock 与基于 Hashcat 的真实执行，并接入 WinZip AES（$zip2$）、PDF 与 Office 加密目标、可配置的 LLM 策略规划、只保存抽象结构的 Feedback Engine v2 与 S5 迁移策略、B 侧的 UCB 成本感知调度与离线回放，以及 C 侧的信息场景（I0～I3）、脱敏 InformationProfile 与统一生成器注册表（PCFG / Markov / history / hybrid）。",
+    "version": "0.6.0"
   },
   "paths": {
     "/api/tasks/{task_id}/runs": {
@@ -1214,6 +1214,113 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
+      "InformationProfile": {
+        "properties": {
+          "scenario": {
+            "$ref": "#/components/schemas/InformationScenario"
+          },
+          "has_personal_information": {
+            "type": "boolean",
+            "title": "Has Personal Information"
+          },
+          "information_types": {
+            "items": {
+              "$ref": "#/components/schemas/InformationType"
+            },
+            "type": "array",
+            "title": "Information Types"
+          },
+          "has_historical_passwords": {
+            "type": "boolean",
+            "title": "Has Historical Passwords"
+          },
+          "historical_password_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Historical Password Count"
+          },
+          "has_pattern_knowledge": {
+            "type": "boolean",
+            "title": "Has Pattern Knowledge"
+          },
+          "structure_summary": {
+            "$ref": "#/components/schemas/InformationStructureSummary"
+          }
+        },
+        "type": "object",
+        "required": [
+          "scenario",
+          "has_personal_information",
+          "has_historical_passwords",
+          "historical_password_count",
+          "has_pattern_knowledge",
+          "structure_summary"
+        ],
+        "title": "InformationProfile",
+        "description": "The sole information boundary exposed to a Planner."
+      },
+      "InformationScenario": {
+        "type": "string",
+        "enum": [
+          "I0",
+          "I1",
+          "I2",
+          "I3"
+        ],
+        "title": "InformationScenario",
+        "description": "Authorized information available to the current task."
+      },
+      "InformationStructureSummary": {
+        "properties": {
+          "personal_field_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Personal Field Count"
+          },
+          "personal_value_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Personal Value Count"
+          },
+          "historical_length_buckets": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Historical Length Buckets"
+          },
+          "historical_character_classes": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Historical Character Classes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "personal_field_count",
+          "personal_value_count"
+        ],
+        "title": "InformationStructureSummary",
+        "description": "Value-free structural information safe for planning and persistence."
+      },
+      "InformationType": {
+        "type": "string",
+        "enum": [
+          "name",
+          "nickname",
+          "username",
+          "email_local_part",
+          "phone_suffix",
+          "birthday_or_year",
+          "region",
+          "organization",
+          "interest_word",
+          "authorized_keyword"
+        ],
+        "title": "InformationType"
+      },
       "PRIR": {
         "properties": {
           "task_id": {
@@ -1285,6 +1392,16 @@
             },
             "type": "array",
             "title": "Warnings"
+          },
+          "information_profile": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InformationProfile"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -2234,8 +2351,100 @@
               }
             ],
             "title": "Description"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "nickname": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nickname"
+          },
+          "username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username"
+          },
+          "email_local_part": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email Local Part"
+          },
+          "phone_suffix": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone Suffix"
+          },
+          "birthday": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Birthday"
+          },
+          "birth_year": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Birth Year"
+          },
+          "interest_words": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Interest Words"
+          },
+          "authorized_keywords": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Authorized Keywords"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "title": "TaskContext"
       },
@@ -2274,8 +2483,17 @@
           },
           "context": {
             "$ref": "#/components/schemas/TaskContext"
+          },
+          "historical_passwords": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "title": "Historical Passwords"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "name",
@@ -2351,6 +2569,9 @@
           "context": {
             "$ref": "#/components/schemas/TaskContext"
           },
+          "information_profile": {
+            "$ref": "#/components/schemas/InformationProfile"
+          },
           "updated_at": {
             "type": "string",
             "format": "date-time",
@@ -2368,6 +2589,7 @@
           "time_budget",
           "candidate_budget",
           "context",
+          "information_profile",
           "updated_at"
         ],
         "title": "TaskDetail"

@@ -60,3 +60,25 @@ class LLMApiStyle(StrEnum):
 class ExecutionMode(StrEnum):
     MOCK = "mock"
     REAL = "real"
+
+
+class InformationScenario(StrEnum):
+    """Authorized information available to the current task."""
+
+    I0 = "I0"  # no auxiliary information
+    I1 = "I1"  # personal information only
+    I2 = "I2"  # historical passwords only
+    I3 = "I3"  # personal information and historical passwords
+
+
+class InformationType(StrEnum):
+    NAME = "name"
+    NICKNAME = "nickname"
+    USERNAME = "username"
+    EMAIL_LOCAL_PART = "email_local_part"
+    PHONE_SUFFIX = "phone_suffix"
+    BIRTHDAY_OR_YEAR = "birthday_or_year"
+    REGION = "region"
+    ORGANIZATION = "organization"
+    INTEREST_WORD = "interest_word"
+    AUTHORIZED_KEYWORD = "authorized_keyword"
