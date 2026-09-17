@@ -51,7 +51,7 @@ from sage_pass.targets import (
 from sage_pass.zip_adapter import ZipHashExtractor
 from sage_pass import transfer
 
-from sim_binaries import write_sim_scripts
+from sim_binaries import write_john_extractor_scripts, write_sim_scripts
 
 MD5_HEX = "0123456789abcdef0123456789abcdef"
 ARGON2ID = (
@@ -452,14 +452,20 @@ def test_transfer_seed_helper_is_defined_once():
 
 def test_target_extractors_cover_hash_zip_pdf_office(tmp_path, monkeypatch):
     script, zip_script = write_sim_scripts(tmp_path)
+    pdf_script, office_script = write_john_extractor_scripts(tmp_path)[0:2]
     monkeypatch.setenv("FAKE_ZIP2JOHN_KIND", "winzip")
+    monkeypatch.setenv("FAKE_JOHN_KIND", "pdf2")
     archive = tmp_path / "a.zip"
     archive.write_bytes(b"PK\x03\x04fake")
+    pdf_file = tmp_path / "a.pdf"
+    pdf_file.write_bytes(b"%PDF-1.7 fake")
+    pdf_extractor = PdfTargetExtractor([sys.executable, str(pdf_script)])
+    office_extractor = OfficeTargetExtractor([sys.executable, str(office_script)])
     extractors = (
         HashTargetExtractor(),
         ZipTargetExtractor(ZipHashExtractor([sys.executable, str(zip_script)])),
-        PdfTargetExtractor(),
-        OfficeTargetExtractor(),
+        pdf_extractor,
+        office_extractor,
     )
 
     hash_target = extract_target(
@@ -474,16 +480,111 @@ def test_target_extractors_cover_hash_zip_pdf_office(tmp_path, monkeypatch):
     assert zip_target.hashes and zip_target.hashcat_mode == 13600
     assert zip_target.algorithm == "zip-aes"
 
-    for target_type, keyword in (
-        (TargetType.PDF, "PDF"),
-        (TargetType.OFFICE, "Office"),
-    ):
-        with pytest.raises(AppError) as excinfo:
-            extract_target(
-                extractors, target_type=target_type, file_path=archive
-            )
-        assert excinfo.value.status_code == 422
-        assert keyword in excinfo.value.message
+    # PDF：$pdf$2$ → hashcat 10500
+    pdf_target = extract_target(
+        extractors, target_type=TargetType.PDF, file_path=pdf_file
+    )
+    assert pdf_target.hashes[0].startswith("$pdf$2")
+    assert pdf_target.hashcat_mode == 10500
+    assert pdf_target.algorithm == "pdf"
+
+    # Office：$office$*2013* → hashcat 9600
+    monkeypatch.setenv("FAKE_JOHN_KIND", "office2013")
+    office_target = extract_target(
+        extractors, target_type=TargetType.OFFICE, file_path=pdf_file
+    )
+    assert office_target.hashcat_mode == 9600
+    assert office_target.algorithm == "office"
+
+
+def test_pdf_extractor_reports_missing_tool_and_unsupported_variant(
+    tmp_path, monkeypatch
+):
+    pdf_script, _ = write_john_extractor_scripts(tmp_path)
+    pdf_file = tmp_path / "b.pdf"
+    pdf_file.write_bytes(b"%PDF fake")
+
+    missing = PdfTargetExtractor("pdf2john-not-installed-xyz")
+    with pytest.raises(AppError) as excinfo:
+        missing.extract(target_type=TargetType.PDF, file_path=pdf_file)
+    assert excinfo.value.status_code == 503
+    assert "pdf2john" in excinfo.value.message
+
+    monkeypatch.setenv("FAKE_JOHN_KIND", "empty")
+    with pytest.raises(AppError) as excinfo:
+        PdfTargetExtractor([sys.executable, str(pdf_script)]).extract(
+            target_type=TargetType.PDF, file_path=pdf_file
+        )
+    assert excinfo.value.status_code == 422
+    assert "未从 PDF 中提取到" in excinfo.value.message
+
+
+def test_pdf_target_runs_real_execution_with_detected_mode(
+    client, tmp_path, monkeypatch
+):
+    """端到端：上传 PDF → analyze 识别 pdf → real 执行使用 $pdf$ 对应模式。"""
+    hashcat_script, zip_script = write_sim_scripts(tmp_path)
+    pdf_script, office_script = write_john_extractor_scripts(tmp_path)[0:2]
+    log_path = tmp_path / "pdf-hashcat.jsonl"
+    monkeypatch.setenv("FAKE_HASHCAT_LOG", str(log_path))
+    monkeypatch.setenv("FAKE_JOHN_KIND", "pdf2")
+    client.app.state.real_executor.hashcat = HashcatAdapter(
+        [sys.executable, str(hashcat_script)]
+    )
+    client.app.state.pdf_extractor = PdfTargetExtractor(
+        [sys.executable, str(pdf_script)]
+    )
+    client.app.state.office_extractor = OfficeTargetExtractor(
+        [sys.executable, str(office_script)]
+    )
+    client.app.state.real_executor.pdf_extractor = client.app.state.pdf_extractor
+    client.app.state.real_executor.office_extractor = (
+        client.app.state.office_extractor
+    )
+
+    uploaded = client.post(
+        "/api/files",
+        files={"file": ("secret.pdf", b"%PDF-1.7 fake", "application/pdf")},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    file_id = uploaded.json()["file_id"]
+    created = client.post(
+        "/api/tasks",
+        json={
+            "name": "pdf-real",
+            "target": {"type": "pdf", "content": None, "file_id": file_id},
+            "known_algorithm": None,
+            "time_budget": 30,
+            "candidate_budget": 2000,
+            "context": {},
+        },
+    )
+    assert created.status_code == 201, created.text
+    task_id = created.json()["task_id"]
+
+    prir = client.post(f"/api/tasks/{task_id}/analyze")
+    assert prir.status_code == 200, prir.text
+    assert prir.json()["algorithm"] == "pdf"
+    assert prir.json()["verification_cost"] == "medium"
+    planned = client.post(f"/api/tasks/{task_id}/plan")
+    assert planned.status_code == 200, planned.text
+
+    started = client.post(
+        f"/api/tasks/{task_id}/execute", json={"mode": "real"}
+    )
+    assert started.status_code == 200, started.text
+    terminal = _wait_terminal(client, started.json()["run_id"])
+    assert terminal["status"] == "completed", terminal
+    payloads = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert payloads
+    # 未提供 hashcat_mode，模式来自提取器（$pdf$2$ → 10500）
+    assert payloads[0]["hash_type"] == "10500"
+    assert payloads[0]["targets"][0].startswith("$pdf$2")
+
 
 def test_schedulers_implement_decision_policy_canonical_api():
     """冻结协议要求的 observe_outcome/snapshot/restore 必须真实可用。"""

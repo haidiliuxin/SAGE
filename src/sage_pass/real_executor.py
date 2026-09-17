@@ -128,6 +128,8 @@ class RealExecutor:
         settings: Settings,
         hashcat: HashcatAdapter | None = None,
         zip_extractor: ZipHashExtractor | None = None,
+        pdf_extractor: Any | None = None,
+        office_extractor: Any | None = None,
         candidate_generator: CandidateGenerator | None = None,
         control: RunControl | None = None,
     ) -> None:
@@ -137,6 +139,8 @@ class RealExecutor:
         self.zip_extractor = zip_extractor or ZipHashExtractor(
             settings.zip2john_path
         )
+        self.pdf_extractor = pdf_extractor
+        self.office_extractor = office_extractor
         self.candidate_generator = candidate_generator or CandidateGenerator()
         self.control = control
         self.feedback_config = FeedbackConfig(
@@ -551,6 +555,8 @@ class RealExecutor:
         return build_target_extractors(
             self.settings,
             zip_extractor=self.zip_extractor,
+            pdf_extractor=self.pdf_extractor,
+            office_extractor=self.office_extractor,
             zip_timeout=ZIP_EXTRACTION_TIMEOUT,
         )
 

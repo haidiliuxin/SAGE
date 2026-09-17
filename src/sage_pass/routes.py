@@ -217,6 +217,8 @@ def analyze_task(
     prir = MockAnalyzer(
         session,
         zip_extractor=request.app.state.zip_extractor,
+        pdf_extractor=request.app.state.pdf_extractor,
+        office_extractor=request.app.state.office_extractor,
         upload_dir=settings.upload_dir,
     ).analyze(task_to_schema(task))
     update_task_status(session, task, TaskStatus.ANALYZED)

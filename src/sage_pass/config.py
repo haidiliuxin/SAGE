@@ -63,6 +63,9 @@ class Settings:
     feedback_maximum_patterns_per_scope: int = 500
     feedback_recency_half_life_days: float = 90.0
     feedback_enable_mock: bool = False
+    pdf2john_path: str = "pdf2john"
+    office2john_path: str = "office2john"
+    extraction_timeout_seconds: float = 30.0
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -114,4 +117,11 @@ class Settings:
             feedback_enable_mock=os.getenv(
                 "SAGE_FEEDBACK_ENABLE_MOCK", "false"
             ).strip().lower() in {"1", "true", "yes", "on"},
+            pdf2john_path=os.getenv("SAGE_PDF2JOHN_PATH", "pdf2john"),
+            office2john_path=os.getenv(
+                "SAGE_OFFICE2JOHN_PATH", "office2john"
+            ),
+            extraction_timeout_seconds=float(
+                os.getenv("SAGE_EXTRACTION_TIMEOUT_SECONDS", "30")
+            ),
         )

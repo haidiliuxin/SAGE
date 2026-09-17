@@ -1,6 +1,6 @@
-# SAGE-Pass 统一接口（A 两周冲刺 · 第 1 周）
+# SAGE-Pass 统一接口（A 两周冲刺 · 第 2 周）
 
-版本：`0.4.0`
+版本：`0.5.0`
 基础地址：`http://127.0.0.1:8000`
 
 本文把团队提供的《统一接口.docx》落实为当前后端契约，并记录真实执行、执行控制、Bandit 自适应调度、Feedback/S5，以及 A 冲刺第 1 周的算法识别链、Argon2、调度模式与跨重启结果查询。字段定义的机器可读版本见同目录 `openapi.json`；运行服务后也可在 `/docs` 联调。
@@ -10,7 +10,7 @@
 - 时间预算单位为秒，候选预算为整数。
 - 任务使用 `task_id`，上传文件使用 `file_id`，执行使用 `run_id`。
 - 任务状态：`created`、`analyzed`、`planned`、`running`、`paused`、`completed`、`failed`、`cancelled`。
-- 目标类型：`hash`、`zip`、`pdf`、`office`、`unknown`。
+- 目标类型：`hash`、`zip`、`pdf`、`office`、`unknown`（ZIP/PDF/Office 均已接入真实提取）。
 - 验证成本：`low`、`medium`、`high`、`unknown`。
 - 策略编号：`S1`、`S2`、`S3`、`S4`、`S5`。
 - 执行模式：`mock`（第一周链路，保留）与 `real`（真实执行）。

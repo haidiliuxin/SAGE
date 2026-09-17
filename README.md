@@ -16,6 +16,8 @@ SAGE-Pass 是面向异构离线口令安全评测任务的智能策略编排系�
 - Mock Executor：启动模拟执行、查询执行状态、返回最终模拟结果；
 - Hashcat Adapter：真实执行的启动、停止（取消）、时间预算自动停止与恢复结果解析（含 `$HEX[]`）；
 - ZIP Adapter：zip2john 提取 WinZip AES（`$zip2$`，hashcat 13600），传统 PKZIP 明确报不支持；
+- PDF/Office Adapter（A 冲刺第 2 周）：pdf2john / office2john 提取加密目标，模式覆盖 10400/10500/10600/10700/10510 与 9700/9800/9400/9500/9600；
+- 数据库迁移：`migrations.py` 版本化幂等迁移（`schema_migrations`），建表后自动应用；
 - Real Executor：`mode: real` 按 Bandit 选择候选批次运行 Hashcat，写回 `StrategyRunModel` 并把任务推进到终态，运行中可暂停、继续或取消；
 - S1 Baseline：后端生成有序基础候选，并支持请求方提供可选的高优先级补充候选；
 - S2 Rule：根据计划参数执行首字母大写、全大写/小写、数字/年份/符号后缀及常见字符替换；
