@@ -179,6 +179,20 @@ def fake(tmp_path, monkeypatch):
     return HashcatAdapter([sys.executable, str(script)])
 
 
+def _wait_record_status(db, run_id: str, wanted: TaskStatus, timeout: float = 10.0):
+    """等待运行记录落库为终态（内存终态会略早于持久化完成）。"""
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        with db.session_factory() as session:
+            record = RunRecordRepository(session).get(run_id)
+            last = TaskStatus(record.status) if record is not None else None
+        if last == wanted:
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"record {run_id} 未在 {timeout}s 内落库为 {wanted}：{last}")
+
+
 def test_recover_resumes_remaining_batches_after_restart(tmp_path, fake):
     db = Database(f"sqlite:///{(tmp_path / 'r.db').as_posix()}")
     db.create_all()
@@ -201,6 +215,7 @@ def test_recover_resumes_remaining_batches_after_restart(tmp_path, fake):
     assert result.total_tested == TOTAL_CANDIDATES
     assert result.total_recovered == 0
 
+    _wait_record_status(db, run_id, TaskStatus.COMPLETED)
     with db.session_factory() as session:
         record = RunRecordRepository(session).get(run_id)
         assert TaskStatus(record.status) == TaskStatus.COMPLETED
@@ -231,6 +246,7 @@ def test_recover_resumes_paused_record_after_restart(tmp_path, fake):
     assert terminal.status == TaskStatus.COMPLETED
     result = executor.result(run_id)
     assert result.total_tested == TOTAL_CANDIDATES
+    _wait_record_status(db, run_id, TaskStatus.COMPLETED)
     executor.shutdown()
     db.dispose()
 
