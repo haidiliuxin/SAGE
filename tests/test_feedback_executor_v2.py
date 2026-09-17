@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sage_pass.candidate_generator import CandidateBatch
+from sage_pass.candidate_types import CandidateRecord
 from sage_pass.config import Settings
 from sage_pass.database import Database
 from sage_pass.enums import PlannerType, StrategyId, TaskStatus
@@ -106,7 +107,10 @@ class _ScriptedS5Candidates:
         for strategy_id, prefix in ((StrategyId.S1, "cold"), (StrategyId.S5, "hot")):
             for index in range(3):
                 values = (f"{prefix}-{index}-a", f"{prefix}-{index}-b")
-                yield CandidateBatch(strategy_id, values)
+                records = tuple(
+                    CandidateRecord(value, strategy_id, ()) for value in values
+                )
+                yield CandidateBatch(strategy_id, values, records)
 
 
 class _ImmediateHandle:

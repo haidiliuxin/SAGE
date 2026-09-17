@@ -14,8 +14,10 @@ from sage_pass.enums import ExecutionMode, TaskStatus
 from sage_pass.hashcat_adapter import HashcatAdapter
 from sage_pass.models import RunRecordModel, StrategyRunModel, TaskModel
 from sage_pass.real_executor import (
+    RUN_SNAPSHOT_SCHEMA_VERSION,
     RealExecutor,
     _serialize_snapshot,
+    _state_from_snapshot,
 )
 from sage_pass.repository import RunRecordRepository, StrategyRunRepository
 from sage_pass.schemas import (
@@ -305,3 +307,58 @@ def test_finalize_respects_excluded_task_ids(tmp_path):
     with db.session_factory() as session:
         assert TaskStatus(session.query(TaskModel).one().status) == TaskStatus.FAILED
     db.dispose()
+
+
+def test_registry_snapshot_v2_and_legacy_snapshot_restore_are_compatible(tmp_path):
+    db = Database(f"sqlite:///{(tmp_path / 'versions.db').as_posix()}")
+    db.create_all()
+    task = _seed_task(db)
+    plan = StrategyPlan(
+        task_id=task.task_id,
+        planner_type="rule",
+        total_time_budget=10,
+        strategies=[StrategyItem(
+            strategy_id="S1",
+            strategy_name="Baseline",
+            priority=1,
+            time_budget=10,
+            candidate_budget=3,
+            reason="version-test",
+        )],
+    )
+    batches = {"S1": list(CandidateGenerator(
+        baseline_candidates=("a", "b", "c")
+    ).iter_plan_batches(plan, batch_size=1))}
+    snapshot = _serialize_snapshot(
+        plan=plan,
+        payload=ExecutionRequest(mode="real"),
+        targets=(MD5_HEX,),
+        hash_mode=0,
+        batches_by_strategy=batches,
+        expected=3,
+        total_candidate_budget=3,
+    )
+    assert snapshot["schema_version"] == RUN_SNAPSHOT_SCHEMA_VERSION
+    assert snapshot["plan"]["strategies"][0]["generator_id"] == "baseline"
+
+    legacy = dict(snapshot)
+    legacy.pop("schema_version")
+    legacy["plan"] = dict(snapshot["plan"])
+    legacy["plan"]["strategies"] = [
+        {
+            key: value
+            for key, value in snapshot["plan"]["strategies"][0].items()
+            if key != "generator_id"
+        }
+    ]
+    states = _state_from_snapshot(legacy, {
+        "strategies": {"S1": {"consumed": 1, "tested": 1}},
+    })
+    assert states[0].generator_id == "baseline"
+    assert states[0].candidate_batches == (("b",), ("c",))
+    db.dispose()
+
+
+def test_unsupported_snapshot_version_is_diagnostic():
+    with pytest.raises(ValueError, match="不支持的运行快照版本 999"):
+        _state_from_snapshot({"schema_version": 999}, {})

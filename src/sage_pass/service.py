@@ -12,12 +12,14 @@ from sqlalchemy.orm import Session
 
 from .enums import TaskStatus
 from .errors import AppError
+from .information import build_information_profile
 from .models import FileModel, TaskModel
 from .repository import FileRepository, TaskRepository
 from .schemas import FileCreated, TargetInput, TaskCreate, TaskDetail
 
 
 SHANGHAI = timezone(timedelta(hours=8), name="Asia/Shanghai")
+_HISTORICAL_PASSWORDS_KEY = "_historical_passwords"
 
 
 def now_iso() -> str:
@@ -51,6 +53,8 @@ ALLOWED_TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
 
 
 def task_to_schema(task: TaskModel) -> TaskDetail:
+    stored_context = dict(task.context or {})
+    historical_passwords = list(stored_context.pop(_HISTORICAL_PASSWORDS_KEY, ()))
     return TaskDetail(
         task_id=task.task_id,
         name=task.name,
@@ -62,7 +66,11 @@ def task_to_schema(task: TaskModel) -> TaskDetail:
         known_algorithm=task.known_algorithm,
         time_budget=task.time_budget,
         candidate_budget=task.candidate_budget,
-        context=task.context,
+        context=stored_context,
+        historical_passwords=historical_passwords,
+        information_profile=build_information_profile(
+            stored_context, historical_passwords
+        ),
         status=task.status,
         created_at=task.created_at,
         updated_at=task.updated_at,
@@ -80,6 +88,11 @@ def create_task(session: Session, payload: TaskCreate) -> TaskModel:
                 details={"field": "target.file_id"},
             )
     timestamp = now_iso()
+    stored_context = payload.context.model_dump()
+    if payload.historical_passwords:
+        # Kept in a reserved, task-local field for execution. It is stripped by
+        # task_to_schema before API serialization and is never a context keyword.
+        stored_context[_HISTORICAL_PASSWORDS_KEY] = payload.historical_passwords
     task = TaskModel(
         task_id=public_id("T"),
         name=payload.name,
@@ -89,7 +102,7 @@ def create_task(session: Session, payload: TaskCreate) -> TaskModel:
         known_algorithm=payload.known_algorithm,
         time_budget=payload.time_budget,
         candidate_budget=payload.candidate_budget,
-        context=payload.context.model_dump(),
+        context=stored_context,
         status=TaskStatus.CREATED.value,
         created_at=timestamp,
         updated_at=timestamp,
