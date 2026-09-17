@@ -11,7 +11,11 @@ from typing import Any, Iterator
 
 from sqlalchemy.orm import Session
 
-from .candidate_generator import CandidateBatch, CandidateGenerator
+from .candidate_generator import (
+    CandidateBatch,
+    CandidateGenerator,
+    CandidatePlanStream,
+)
 from .candidate_types import CandidateRecord
 from .config import Settings
 from .enums import (
@@ -75,96 +79,12 @@ from .zip_adapter import ZipHashExtractor
 from .transfer import load_transfer_knowledge
 
 ZIP_EXTRACTION_TIMEOUT = 30.0
-RUN_SNAPSHOT_SCHEMA_VERSION = 2
+RUN_SNAPSHOT_SCHEMA_VERSION = 3
 LOGGER = logging.getLogger(__name__)
 
 _TERMINAL_STATUSES = frozenset(
     {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}
 )
-
-
-class _PlanStream:
-    """按需推进候选管线：惰性生成，并把批次按调度单元排队。
-
-    候选管线必须在整计划范围内一次生成（跨策略全局去重、按优先级的预算切片都在
-    这一遍里完成），因此这里保持"一条管线"的语义，只把生成时机改成按需：
-
-    - 调度器要某个单元的批次时才推进管线，直到该单元出现下一批（其余单元的批次
-      按优先级顺序排队，等被选中时再取）；
-    - 已消费的批次立即释放，内存上界不超过管线本身在一次生成的产出；
-    - 恢复运行时按每个单元已确认消费的批次数跳过（确定性的生成顺序保证可重建）。
-    """
-
-    def __init__(
-        self,
-        batches: Iterator[CandidateBatch],
-        *,
-        arms: Iterable[str] = (),
-        skip: Mapping[str, int] | None = None,
-    ) -> None:
-        self._batches = batches
-        self._queues: dict[str, deque[CandidateBatch]] = {
-            arm: deque() for arm in arms
-        }
-        self._skip: dict[str, int] = dict(skip or {})
-        self._done = False
-
-    def _advance(self, arm: str) -> None:
-        queue = self._queues.setdefault(arm, deque())
-        while not queue and not self._done:
-            try:
-                batch = next(self._batches)
-            except StopIteration:
-                self._done = True
-                return
-            owner = batch.strategy_id.value if batch.strategy_id else arm
-            remaining_skip = self._skip.get(owner, 0)
-            if remaining_skip > 0:  # 恢复：跳过重启前已确认消费的批次
-                self._skip[owner] = remaining_skip - 1
-                continue
-            self._queues.setdefault(owner, deque()).append(batch)
-
-    def peek(self, arm: str) -> CandidateBatch | None:
-        self._advance(arm)
-        queue = self._queues.get(arm)
-        return queue[0] if queue else None
-
-    def take(self, arm: str) -> CandidateBatch | None:
-        self._advance(arm)
-        queue = self._queues.get(arm)
-        if not queue:
-            return None
-        return queue.popleft()
-
-    @property
-    def generator_id(self) -> str:
-        for queue in self._queues.values():
-            if queue and queue[0].generator_id:
-                return queue[0].generator_id
-        return ""
-
-
-def _plan_from_snapshot(snapshot: dict[str, Any]) -> StrategyPlan:
-    """从运行快照重建策略计划（恢复流式运行时用来重建候选流）。"""
-    block = snapshot.get("plan", {})
-    strategies = [
-        StrategyItem(
-            strategy_id=StrategyId(entry["strategy_id"]),
-            strategy_name=entry.get("strategy_name", entry["strategy_id"]),
-            priority=int(entry["priority"]),
-            time_budget=int(entry["time_budget"]),
-            candidate_budget=int(entry["candidate_budget"]),
-            reason=entry.get("reason", ""),
-            parameters=dict(entry.get("parameters", {})),
-        )
-        for entry in block.get("strategies", [])
-    ]
-    return StrategyPlan(
-        task_id=str(snapshot.get("task_id", "")),
-        planner_type=PlannerType.MOCK,
-        total_time_budget=int(block.get("total_time_budget", 0)),
-        strategies=strategies,
-    )
 
 
 @dataclass
@@ -195,9 +115,6 @@ class _StrategyState:
     # 原生词表攻击：直接让 hashcat 读整本字典（单进程、不经过 Python 候选列表）。
     native_wordlist_path: Path | None = None
     native_pending: bool = False
-    # 惰性候选流：新运行使用流式拉取；从快照恢复的历史运行仍使用物化数组。
-    stream: "_BatchStream | None" = None
-    stream_skip: int = 0
 
 
 @dataclass
@@ -225,6 +142,7 @@ class _RunState:
     research_previous_arm: str | None = None
     research_stop_reason: str | None = None
     stop_on_hit: bool = False
+    candidate_stream: CandidatePlanStream | None = None
 
 
 class RealExecutor:
@@ -430,18 +348,29 @@ class RealExecutor:
         )
         strategies: list[_StrategyState] = []
         expected = 0
+        candidate_stream: CandidatePlanStream | None = None
         try:
-            plan_stream = _PlanStream(
-                self.candidate_generator.iter_plan_batches(
+            if hasattr(self.candidate_generator, "open_plan_stream"):
+                candidate_stream = self.candidate_generator.open_plan_stream(
+                    plan,
+                    supplied_candidates=payload.candidates,
+                    task_context=task.context,
+                    historical_passwords=task.historical_passwords,
+                    transfer_patterns=transfer_patterns,
+                    max_candidates=task.candidate_budget,
+                )
+            else:  # 兼容注入的旧版候选提供方
+                for batch in self.candidate_generator.iter_plan_batches(
                     plan,
                     supplied_candidates=payload.candidates,
                     task_context=task.context,
                     historical_passwords=task.historical_passwords,
                     transfer_patterns=transfer_patterns,
                     batch_size=self.settings.decision_batch_size,
-                ),
-                arms=[item.strategy_id.value for item in plan.strategies],
-            )
+                ):
+                    batches_by_strategy.setdefault(
+                        batch.strategy_id.value, []
+                    ).append(batch)
         except (ValueError, GeneratorRegistryError) as exc:
             raise AppError(
                 "EXECUTION_FAILED",
@@ -450,18 +379,18 @@ class RealExecutor:
                 details={"task_id": task.task_id, "reason": str(exc)},
             ) from exc
         for item in plan.strategies:
-            # 只为该单元预取一批（首轮探索需要知道各单元是否可用），其余候选留在管线里。
-            try:
-                first_batch = plan_stream.peek(item.strategy_id.value)
-            except (ValueError, GeneratorRegistryError) as exc:
-                raise AppError(
-                    "EXECUTION_FAILED",
-                    "生成真实执行候选失败",
-                    status_code=422,
-                    details={"task_id": task.task_id, "reason": str(exc)},
-                ) from exc
-            # 进度分母使用计划预算（流式生成时总数事先不可知），完成时统一为 100%。
-            expected += item.candidate_budget
+            generated_batches = tuple(
+                batches_by_strategy.get(item.strategy_id.value, ())
+            )
+            candidate_batches = tuple(batch.candidates for batch in generated_batches)
+            candidate_record_batches = tuple(
+                batch.records for batch in generated_batches
+            )
+            expected += (
+                item.candidate_budget
+                if candidate_stream is not None
+                else sum(len(batch) for batch in candidate_batches)
+            )
             strategies.append(
                 _StrategyState(
                     strategy_id=item.strategy_id.value,
@@ -471,10 +400,15 @@ class RealExecutor:
                     candidate_budget=item.candidate_budget,
                     parameters=item.parameters,
                     generator_id=(
-                        (first_batch.generator_id if first_batch else "")
-                        or STRATEGY_GENERATOR_IDS[item.strategy_id]
+                        candidate_stream.generator_id(item.strategy_id)
+                        if candidate_stream is not None
+                        else generated_batches[0].generator_id
+                        if generated_batches
+                        and generated_batches[0].generator_id
+                        else STRATEGY_GENERATOR_IDS[item.strategy_id]
                     ),
-                    stream=plan_stream,
+                    candidate_batches=candidate_batches,
+                    candidate_record_batches=candidate_record_batches,
                     transfer_score=(
                         knowledge_summary.transfer_score
                         if item.strategy_id.value == "S5"
@@ -494,14 +428,8 @@ class RealExecutor:
                     ),
                 )
             )
-        if (
-            not any(
-                item.stream is not None
-                and item.stream.peek(item.strategy_id) is not None
-                for item in strategies
-            )
-            and native_wordlist is None
-        ):
+        expected = min(expected, task.candidate_budget)
+        if expected == 0 and native_wordlist is None:
             raise AppError(
                 "EXECUTION_FAILED",
                 "后端未能为策略计划生成候选，无法启动真实执行",
@@ -531,11 +459,11 @@ class RealExecutor:
                 if payload.stop_on_hit is not None
                 else self.settings.stop_on_hit
             ),
-            generator_ids={
-                item.strategy_id: item.generator_id for item in strategies
-            },
-            streaming=True,
-            supplied_candidates=tuple(payload.candidates),
+            candidate_stream=(
+                candidate_stream.snapshot()
+                if candidate_stream is not None
+                else None
+            ),
         )
         # Freeze reward configuration with the run; a later service default
         # must not change the interpretation of resumed batches.
@@ -595,6 +523,7 @@ class RealExecutor:
             started_at=started_at,
             expected_candidates=expected,
             scheduler=scheduler,
+            candidate_stream=candidate_stream,
             stop_on_hit=(
                 payload.stop_on_hit
                 if payload.stop_on_hit is not None
@@ -797,6 +726,14 @@ class RealExecutor:
             )
         return path
 
+    def _resume_native_wordlist(self, task_id: str) -> Path | None:
+        """恢复运行：重新解析任务上的词表（或服务器端配置的词表）。"""
+        with self.session_factory() as session:
+            task_model = TaskRepository(session).get(task_id)
+            if task_model is None:
+                return None
+            return self._native_wordlist_path(session, task_to_schema(task_model))
+
     def _target_file_path(self, session: Session, task: TaskDetail):
         if not task.target.file_id:
             return None
@@ -904,6 +841,20 @@ class RealExecutor:
                         type(exc).__name__,
                     )
 
+            if persisted and state.candidate_stream is not None and hasattr(
+                self.hashcat, "cleanup_run_sessions"
+            ):
+                try:
+                    self.hashcat.cleanup_run_sessions(
+                        self.settings.upload_dir.parent / "hashcat-sessions",
+                        state.run_id,
+                    )
+                except OSError:
+                    LOGGER.warning(
+                        "hashcat session cleanup failed for run_id=%s",
+                        state.run_id,
+                    )
+
     def _execute_strategies(self, state: _RunState) -> None:
         scheduler = state.scheduler
         if scheduler is None:  # pragma: no cover - start() always installs one
@@ -918,7 +869,9 @@ class RealExecutor:
             if state.cancel_requested:
                 self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
                 return
-            next_batch_sizes = _next_batch_sizes(state.strategies)
+            next_batch_sizes = _next_batch_sizes(
+                state, self.settings.hashcat_stream_batch_size
+            )
             prior_state = scheduler.snapshot_statistics()
             diagnostics = decision_diagnostics(scheduler, next_batch_sizes)
             decision = scheduler.select(next_batch_sizes)
@@ -933,17 +886,17 @@ class RealExecutor:
             if item.native_wordlist_path is not None:
                 # 原生词表攻击：不经过 Python 候选，hashcat 自己读整本字典。
                 candidates: tuple[str, ...] = ()
-            elif item.stream is not None:
-                source = item.stream.take(item.strategy_id)
-                candidates = (
-                    tuple(source.candidates[: decision.candidate_limit])
-                    if source is not None
-                    else ()
+            elif state.candidate_stream is not None:
+                candidate_batch = state.candidate_stream.pull(
+                    item.strategy_id, decision.candidate_limit
                 )
+                candidates = candidate_batch.candidates
+                if not candidates:
+                    continue
             else:
                 source_batch = item.candidate_batches[item.next_batch_index]
                 candidates = source_batch[: decision.candidate_limit]
-            item.next_batch_index += 1
+                item.next_batch_index += 1
             item.scheduled_batches += 1
             state.round_index += 1
             prior_scores = {key: value.score for key, value in diagnostics["scores"].items()}
@@ -985,6 +938,16 @@ class RealExecutor:
                             candidates=candidates,
                             timeout_seconds=decision.time_limit,
                             candidate_budget=len(candidates),
+                            session_dir=(
+                                str(
+                                    self.settings.upload_dir.parent
+                                    / "hashcat-sessions"
+                                    / state.run_id
+                                    / f"{item.strategy_id}-{item.scheduled_batches}"
+                                )
+                                if state.candidate_stream is not None
+                                else None
+                            ),
                         )
                     )
             except AppError as exc:
@@ -1123,7 +1086,9 @@ class RealExecutor:
         reason = stop_reason or (
             "cancelled" if state.cancel_requested or outcome.status == TaskStatus.CANCELLED else
             "execution_failed" if outcome.status == TaskStatus.FAILED else
-            state.scheduler.stop_reason(_next_batch_sizes(state.strategies))
+            state.scheduler.stop_reason(_next_batch_sizes(
+                state, self.settings.hashcat_stream_batch_size
+            ))
         )
         logged = state.research.complete(
             outcome, updated_state=state.scheduler.snapshot_statistics(),
@@ -1259,12 +1224,29 @@ class RealExecutor:
         progress: dict[str, Any],
     ) -> None:
         strategies = _state_from_snapshot(snapshot, progress)
-        if snapshot.get("streaming"):
+        stream_snapshot = (
+            progress.get("candidate_stream") or snapshot.get("candidate_stream")
+        )
+        candidate_stream: CandidatePlanStream | None = None
+        if stream_snapshot is not None:
+            if not isinstance(stream_snapshot, dict):
+                self._fail_stale_record(run_id, task_id, "candidate_stream 快照无效")
+                return
             try:
-                self._attach_resumed_stream(snapshot, strategies)
+                candidate_stream = self.candidate_generator.restore_plan_stream(
+                    stream_snapshot
+                )
+                native_wordlist = self._resume_native_wordlist(task_id)
             except Exception as exc:  # 恢复失败不应让服务启动失败
                 self._fail_stale_record(run_id, task_id, f"恢复流式运行失败：{exc}")
                 return
+            for item in strategies:
+                if (
+                    native_wordlist is not None
+                    and item.strategy_id == StrategyId.S1.value
+                ):
+                    item.native_wordlist_path = native_wordlist
+                    item.native_pending = item.consumed_batches == 0
         with self.session_factory() as session:
             existing = StrategyRunRepository(session).list_by_run_id(run_id)
             if not existing:
@@ -1296,6 +1278,7 @@ class RealExecutor:
                 "round_index", sum(item.consumed_batches for item in strategies)
             )),
             research_previous_arm=progress.get("research_previous_arm"),
+            candidate_stream=candidate_stream,
         )
         with self._lock:
             self._registry[run_id] = state
@@ -1308,53 +1291,6 @@ class RealExecutor:
         )
         state.thread = thread
         thread.start()
-
-    def _attach_resumed_stream(
-        self, snapshot: dict[str, Any], strategies: list[_StrategyState]
-    ) -> None:
-        """重启后为流式运行重建候选管线，并按各单元已消费批次数快进。"""
-        task_id = str(snapshot.get("task_id") or "")
-        plan = _plan_from_snapshot(snapshot)
-        with self.session_factory() as session:
-            task_model = TaskRepository(session).get(task_id)
-            if task_model is None:
-                raise AppError(
-                    "EXECUTION_FAILED",
-                    "任务不存在，无法恢复运行",
-                    status_code=422,
-                    details={"task_id": task_id},
-                )
-            task = task_to_schema(task_model)
-            prir_model = PRIRRepository(session).get(task.task_id)
-            transfer_patterns, _ = load_transfer_knowledge(
-                PatternKnowledgeRepository(session),
-                target_type=task.target.type.value,
-                algorithm=prir_model.algorithm if prir_model is not None else "unknown",
-                candidate_budget=task.candidate_budget,
-                config=self.feedback_config,
-            )
-            stream = _PlanStream(
-                self.candidate_generator.iter_plan_batches(
-                    plan,
-                    supplied_candidates=tuple(
-                        snapshot.get("supplied_candidates", ())
-                    ),
-                    task_context=task.context,
-                    historical_passwords=task.historical_passwords,
-                    transfer_patterns=transfer_patterns,
-                    batch_size=self.settings.decision_batch_size,
-                ),
-                arms=[item.strategy_id for item in strategies],
-                skip={
-                    item.strategy_id: item.stream_skip for item in strategies
-                },
-            )
-            native_wordlist = self._native_wordlist_path(session, task)
-        for item in strategies:
-            item.stream = stream
-            if native_wordlist is not None and item.strategy_id == StrategyId.S1.value:
-                item.native_wordlist_path = native_wordlist
-                item.native_pending = item.consumed_batches == 0
 
     def _fail_stale_record(self, run_id: str, task_id: str, reason: str) -> None:
         timestamp = now_iso()
@@ -1398,7 +1334,7 @@ class RealExecutor:
                 continue
             item.status = TaskStatus.COMPLETED.value
             item.finished_at = finished_at
-            if not item.candidate_batches and item.native_wordlist_path is None:
+            if item.tested == 0:
                 item.message = "该策略未生成候选，无需执行"
             elif label == "all_targets_recovered":
                 item.message = (
@@ -1604,9 +1540,7 @@ def _serialize_snapshot(
     transfer_scores: dict[str, float | None] | None = None,
     scheduler_type: str = SchedulerType.HEURISTIC_BANDIT.value,
     stop_on_hit: bool = False,
-    generator_ids: dict[str, str] | None = None,
-    streaming: bool = False,
-    supplied_candidates: tuple[str, ...] = (),
+    candidate_stream: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """启动时写入运行记录的静态快照（目标、计划、候选批次等）。"""
     return {
@@ -1616,9 +1550,7 @@ def _serialize_snapshot(
         "expected_candidates": expected,
         "timeout_override": payload.timeout,
         "stop_on_hit": bool(stop_on_hit),
-        "task_id": plan.task_id,
-        "streaming": bool(streaming),
-        "supplied_candidates": list(supplied_candidates) if streaming else [],
+        "candidate_stream": candidate_stream,
         "scheduler_type": scheduler_type,
         "plan": {
             "total_time_budget": plan.total_time_budget,
@@ -1632,13 +1564,10 @@ def _serialize_snapshot(
                     "candidate_budget": strategy.candidate_budget,
                     "parameters": dict(strategy.parameters),
                     "generator_id": (
-                        (generator_ids or {}).get(strategy.strategy_id.value)
-                        or (
-                            batches_by_strategy[strategy.strategy_id.value][0].generator_id
-                            if batches_by_strategy.get(strategy.strategy_id.value)
-                            and batches_by_strategy[strategy.strategy_id.value][0].generator_id
-                            else STRATEGY_GENERATOR_IDS[strategy.strategy_id]
-                        )
+                        batches_by_strategy[strategy.strategy_id.value][0].generator_id
+                        if batches_by_strategy.get(strategy.strategy_id.value)
+                        and batches_by_strategy[strategy.strategy_id.value][0].generator_id
+                        else STRATEGY_GENERATOR_IDS[strategy.strategy_id]
                     ),
                     "transfer_score": (transfer_scores or {}).get(
                         strategy.strategy_id.value
@@ -1673,6 +1602,7 @@ def _initial_progress(
             for entry in snapshot["plan"]["strategies"]
         },
         "scheduler_stats": {},
+        "candidate_stream": snapshot.get("candidate_stream"),
     }
 
 
@@ -1697,6 +1627,10 @@ def _serialize_progress(state: _RunState) -> dict[str, Any]:
             for item in state.strategies
         },
         "scheduler_stats": scheduler_stats,
+        "candidate_stream": (
+            state.candidate_stream.snapshot()
+            if state.candidate_stream is not None else None
+        ),
         "scheduler_snapshot": state.scheduler.snapshot() if state.scheduler is not None else None,
         "round_index": state.round_index,
         "research_previous_arm": state.research_previous_arm,
@@ -1751,7 +1685,6 @@ def _state_from_snapshot(
                 consumed_batches=consumed,
                 scheduled_batches=consumed,
                 transfer_score=entry.get("transfer_score"),
-                stream_skip=consumed,
             )
         )
     return states
@@ -1764,10 +1697,10 @@ def _validate_snapshot_version(snapshot: dict[str, Any]) -> int:
         version = int(raw)
     except (TypeError, ValueError) as exc:
         raise ValueError("运行快照 schema_version 无效") from exc
-    if version not in {1, RUN_SNAPSHOT_SCHEMA_VERSION}:
+    if version not in {1, 2, RUN_SNAPSHOT_SCHEMA_VERSION}:
         raise ValueError(
             f"不支持的运行快照版本 {version}；"
-            f"当前支持 1 和 {RUN_SNAPSHOT_SCHEMA_VERSION}"
+            f"当前支持 1、2 和 {RUN_SNAPSHOT_SCHEMA_VERSION}"
         )
     return version
 
@@ -1902,24 +1835,25 @@ def _strategy_result_time(item: _StrategyState) -> float:
 
 
 def _next_batch_sizes(
-    strategies: list[_StrategyState],
+    state: _RunState,
+    stream_batch_size: int,
 ) -> dict[str, int]:
-    sizes: dict[str, int] = {}
-    for item in strategies:
+    """各调度单元当前可用的候选量：流式运行时问候选流，其余用物化数组。"""
+    if state.candidate_stream is not None:
+        sizes = dict(state.candidate_stream.next_sizes(stream_batch_size))
+    else:
+        sizes = {
+            item.strategy_id: (
+                len(item.candidate_batches[item.next_batch_index])
+                if item.next_batch_index < len(item.candidate_batches)
+                else 0
+            )
+            for item in state.strategies
+        }
+    # 原生词表攻击覆盖该单元：它在 Python 候选流之外，单独记一次可用量。
+    for item in state.strategies:
         if item.native_wordlist_path is not None:
             sizes[item.strategy_id] = (
                 item.candidate_budget if item.native_pending else 0
             )
-            continue
-        if item.stream is not None:
-            batch = item.stream.peek(item.strategy_id)  # 惰性：需要时才推进管线
-            sizes[item.strategy_id] = (
-                len(batch.candidates) if batch is not None else 0
-            )
-            continue
-        sizes[item.strategy_id] = (
-            len(item.candidate_batches[item.next_batch_index])
-            if item.next_batch_index < len(item.candidate_batches)
-            else 0
-        )
     return sizes

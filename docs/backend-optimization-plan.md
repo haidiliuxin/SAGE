@@ -19,7 +19,7 @@
 
 | # | 问题 | 现状 | 建议 |
 |---|---|---|---|
-| P1-1 | `RunRecordModel.snapshot.batches` **把全部候选字符串以 JSON 落库** | 候选量大时单记录可达数 MB～数十 MB | 候选写入临时词表文件、记录只存引用；或存“计划 + 种子”，恢复时用 `CandidateGenerator` 确定性重建（代码不变则结果一致） |
+| P1-1 | `RunRecordModel.snapshot.batches` **把全部候选字符串以 JSON 落库** | 已改为候选流游标 + 去重 digest 索引；仅旧记录保留 `batches` 兼容读取 | 后续关注 generator 版本漂移与更大预算下 digest 索引压缩 |
 | P1-2 | **每个批次一次 hashcat 进程启动** | 批量 1000 时每次拉起进程约 0.2~1s，慢 Hash 场景浪费明显 | 批次大小做成 env 配置并文档化权衡；同策略顺序候选可合并更大批次 |
 | P1-3 | **接口一致性检查靠人肉脚本** | OpenAPI 与运行时一致性目前在合并流程手动执行 | 提升为 pytest；为 checkpoint/断点续跑加大 run 基准测试，防第 4 周实验回归 |
 

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -27,16 +29,6 @@ HASHCAT_MODES = {
     "bcrypt": 3200,
     "winzip": 13600,
     "zip-aes": 13600,
-    # 传统 PKZIP（ZipCrypto）。精确模式由 zip2john 的 $pkzip2$ 结构在提取时判定
-    # （17200 单文件压缩 / 17210 单文件未压缩 / 17225 通吃 / 17230 仅校验和），
-    # 这里的条目用于调用方显式声明算法名时的回退。
-    "zip-legacy": 17225,
-    "zipcrypto": 17225,
-    "pkzip2": 17225,
-    "pkzip": 17225,
-    "zip-pkzip-compressed": 17200,
-    "zip-pkzip-uncompressed": 17210,
-    "zip-pkzip-checksum-only": 17230,
     # Argon2 家族（模式号取自本机 hashcat -hh：34000 Argon2 / 70000 Argon2id bridged）
     "argon2": 34000,
     "argon2i": 34000,
@@ -68,12 +60,6 @@ ALGORITHM_ALIASES = {
     "winzip-aes": "zip-aes",
     "zip-aes": "zip-aes",
     "zipaes": "zip-aes",
-    "zip-legacy": "zip-legacy",
-    "zipcrypto": "zip-legacy",
-    "zip-crypto": "zip-legacy",
-    "pkzip": "zip-legacy",
-    "pkzip2": "zip-legacy",
-    "zip-pkzip": "zip-legacy",
 }
 
 
@@ -97,6 +83,7 @@ class HashcatJob:
     candidates: tuple[str, ...] = ()
     timeout_seconds: float = 60.0
     candidate_budget: int = 0
+    session_dir: str | None = None
     # 原生攻击：直接交给 hashcat 自己枚举，不经过 Python 候选列表。
     # attack_mode 0 = 词表（可配 rules_path），3 = 掩码，6/7 = 混合攻击。
     attack_mode: int = 0
@@ -199,49 +186,111 @@ class HashcatHandle:
         self._started = time.monotonic()
         self._stop_reason: str | None = None
         self._result: HashcatResult | None = None
-        self._temp_dir = tempfile.TemporaryDirectory(prefix="sage-hashcat-")
-        working_dir = Path(self._temp_dir.name)
+        # 原生攻击（整本字典/掩码）没有"批次级续跑"语义，固定使用临时目录。
+        session_dir = None if native else job.session_dir
+        self._temp_dir = (
+            None
+            if session_dir is not None
+            else tempfile.TemporaryDirectory(prefix="sage-hashcat-")
+        )
+        working_dir = (
+            Path(session_dir)
+            if session_dir is not None
+            else Path(self._temp_dir.name)
+        )
+        working_dir.mkdir(parents=True, exist_ok=True)
         self._target_path = working_dir / "target.hash"
         self._wordlist_path = working_dir / "candidates.txt"
         self._outfile_path = working_dir / "recovered.txt"
         self._stdout_path = working_dir / "stdout.log"
         self._stderr_path = working_dir / "stderr.log"
-        self._target_path.write_text("\n".join(targets) + "\n", encoding="utf-8")
-        if candidates:
-            self._wordlist_path.write_text(
-                "\n".join(candidates) + "\n", encoding="utf-8"
+        self._restore_path = working_dir / "session.restore"
+        self._metadata_path = working_dir / "session.json"
+        resuming = self._restore_path.is_file()
+        if resuming:
+            self._validate_resume_metadata(targets, candidates)
+        else:
+            self._target_path.write_text("\n".join(targets) + "\n", encoding="utf-8")
+            self._wordlist_path.write_text("\n".join(candidates) + "\n", encoding="utf-8")
+            self._write_session_metadata(
+                targets,
+                candidates,
+                lifecycle="prepared",
+                restore_used=False,
             )
-        self._stdout_file = self._stdout_path.open("wb")
-        self._stderr_file = self._stderr_path.open("wb")
+        self._stdout_file = self._stdout_path.open("ab" if resuming else "wb")
+        self._stderr_file = self._stderr_path.open("ab" if resuming else "wb")
 
-        args = [
+        common = [
             *command,
-            "--hash-type",
-            str(job.hash_mode),
-            *attack_options,
             "--session",
             _safe_session_name(job.run_id),
-            "--runtime",
-            str(max(1, math.ceil(job.timeout_seconds))),
-            "--status",
-            "--status-json",
-            "--status-timer",
-            "1",
-            "--potfile-disable",
-            "--restore-disable",
-            "--outfile",
-            str(self._outfile_path),
-            "--outfile-format",
-            "1,2",
-            "--separator",
-            "\t",
-            str(self._target_path),
-            *(attack_positional if native else [str(self._wordlist_path)]),
+            "--restore-file-path",
+            str(self._restore_path),
         ]
+        if native:
+            # 原生攻击：不经过候选文件，也不使用批次级 restore。
+            args = [
+                *common,
+                "--hash-type",
+                str(job.hash_mode),
+                *attack_options,
+                "--runtime",
+                str(max(1, math.ceil(job.timeout_seconds))),
+                "--status",
+                "--status-json",
+                "--status-timer",
+                "1",
+                "--potfile-disable",
+                "--restore-disable",
+                "--outfile",
+                str(self._outfile_path),
+                "--outfile-format",
+                "1,2",
+                "--separator",
+                "\t",
+                str(self._target_path),
+                *attack_positional,
+            ]
+        else:
+            args = (
+                [*common, "--restore"]
+                if resuming
+                else [
+                    *common,
+                    "--hash-type",
+                    str(job.hash_mode),
+                    "--attack-mode",
+                    "0",
+                    "--runtime",
+                    str(max(1, math.ceil(job.timeout_seconds))),
+                    "--status",
+                    "--status-json",
+                    "--status-timer",
+                    "1",
+                    "--potfile-disable",
+                    "--restore-timer",
+                    "1",
+                    "--outfile",
+                    str(self._outfile_path),
+                    "--outfile-format",
+                    "1,2",
+                    "--separator",
+                    "\t",
+                    str(self._target_path),
+                    str(self._wordlist_path),
+                ]
+            )
         try:
             # hashcat 的 OpenCL 内核目录按进程工作目录解析（./OpenCL/），
             # 因此当命令指向真实可执行文件时，须以其所在目录作为 cwd。
             run_cwd = _executable_dir(command) or working_dir
+            self._write_session_metadata(
+                targets,
+                candidates,
+                lifecycle="running",
+                restore_used=resuming,
+            )
             self._process = subprocess.Popen(
                 args,
                 cwd=run_cwd,
@@ -252,7 +301,8 @@ class HashcatHandle:
             )
         except (FileNotFoundError, OSError) as exc:
             self._close_files()
-            self._temp_dir.cleanup()
+            if self._temp_dir is not None:
+                self._temp_dir.cleanup()
             raise AppError(
                 "EXECUTION_FAILED",
                 "无法启动 Hashcat，请检查 SAGE_HASHCAT_PATH",
@@ -305,7 +355,8 @@ class HashcatHandle:
                 self._terminate()
             if self._result is None:
                 self._finalize(self._process.returncode)
-            self._temp_dir.cleanup()
+            if self._temp_dir is not None:
+                self._temp_dir.cleanup()
 
     def _on_timeout(self) -> None:
         with self._lock:
@@ -365,7 +416,92 @@ class HashcatHandle:
             stdout=stdout,
             stderr=stderr,
         )
+        try:
+            self._write_session_metadata(
+                _validated_lines(self.job.target_hashes, "target_hashes"),
+                _validated_lines(
+                    self.job.candidates[: self.job.candidate_budget],
+                    "candidates",
+                ),
+                lifecycle="finished",
+                restore_used=_metadata_restore_used(self._metadata_path),
+                result=self._result,
+            )
+        except Exception:
+            pass
         return self._result
+
+    def _validate_resume_metadata(
+        self,
+        targets: tuple[str, ...],
+        candidates: tuple[str, ...],
+    ) -> None:
+        if not self._metadata_path.is_file():
+            raise AppError(
+                "EXECUTION_FAILED",
+                "Hashcat restore 文件缺少会话元数据，无法验证恢复安全性",
+                status_code=409,
+                details={"session_dir": str(self._metadata_path.parent)},
+            )
+        try:
+            metadata = json.loads(self._metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise AppError(
+                "EXECUTION_FAILED",
+                "Hashcat 会话元数据损坏，无法恢复",
+                status_code=409,
+                details={"reason": str(exc)},
+            ) from exc
+        expected = _session_fingerprint(self.job, targets, candidates)
+        if metadata.get("fingerprint") != expected:
+            raise AppError(
+                "EXECUTION_FAILED",
+                "Hashcat restore 与当前批次不匹配，已拒绝恢复",
+                status_code=409,
+                details={"session_dir": str(self._metadata_path.parent)},
+            )
+        if not self._target_path.is_file() or not self._wordlist_path.is_file():
+            raise AppError(
+                "EXECUTION_FAILED",
+                "Hashcat 会话文件不完整，无法恢复",
+                status_code=409,
+                details={"session_dir": str(self._metadata_path.parent)},
+            )
+
+    def _write_session_metadata(
+        self,
+        targets: tuple[str, ...],
+        candidates: tuple[str, ...],
+        *,
+        lifecycle: str,
+        restore_used: bool,
+        result: HashcatResult | None = None,
+    ) -> None:
+        payload: dict[str, object] = {
+            "schema_version": 1,
+            "run_id": self.job.run_id,
+            "hash_mode": self.job.hash_mode,
+            "candidate_count": len(candidates),
+            "candidate_budget": self.job.candidate_budget,
+            "timeout_seconds": self.job.timeout_seconds,
+            "fingerprint": _session_fingerprint(self.job, targets, candidates),
+            "lifecycle": lifecycle,
+            "restore_used": restore_used,
+            "restore_exists": self._restore_path.is_file(),
+            "target_file": str(self._target_path),
+            "wordlist_file": str(self._wordlist_path),
+            "outfile": str(self._outfile_path),
+        }
+        if result is not None:
+            payload["result"] = {
+                "status": result.status.value,
+                "tested": result.tested,
+                "recovered": len(result.recovered),
+                "exit_code": result.exit_code,
+                "duration": result.duration,
+                "message": result.message,
+            }
+        _atomic_json_write(self._metadata_path, payload)
 
     def _close_files(self) -> None:
         for stream in (self._stdout_file, self._stderr_file):
@@ -395,6 +531,15 @@ class HashcatAdapter:
                 details={},
             )
         return HashcatHandle(self.command, job)
+
+    def cleanup_run_sessions(self, root: Path, run_id: str) -> None:
+        """Remove completed run session files while keeping crash recovery safe."""
+        prepared_root = root.resolve()
+        target = (prepared_root / _safe_session_name(run_id)).resolve()
+        if target.parent != prepared_root:
+            raise ValueError("invalid hashcat session path")
+        if target.is_dir():
+            shutil.rmtree(target)
 
 
 def _executable_dir(command: Sequence[str]) -> str | None:
@@ -429,6 +574,46 @@ def _validated_lines(values: Sequence[str], field: str) -> tuple[str, ...]:
                 details={"field": field, "index": index},
             )
     return tuple(values)
+
+
+def _session_fingerprint(
+    job: HashcatJob,
+    targets: Sequence[str],
+    candidates: Sequence[str],
+) -> dict[str, object]:
+    return {
+        "hash_mode": job.hash_mode,
+        "targets_sha256": _lines_digest(targets),
+        "candidates_sha256": _lines_digest(candidates),
+        "target_count": len(targets),
+        "candidate_count": len(candidates),
+    }
+
+
+def _lines_digest(values: Sequence[str]) -> str:
+    digest = json.JSONEncoder(
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode(list(values))
+    return hashlib.sha256(digest.encode("utf-8")).hexdigest()
+
+
+def _atomic_json_write(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2),
+        encoding="utf-8",
+    )
+    tmp.replace(path)
+
+
+def _metadata_restore_used(path: Path) -> bool:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool(payload.get("restore_used"))
 
 
 def _safe_session_name(value: str) -> str:
