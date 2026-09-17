@@ -161,18 +161,17 @@ def test_wordlist_file_must_be_a_text_dictionary(client, tmp_path, monkeypatch):
 def test_candidates_are_generated_lazily_not_materialized_up_front(
     client, tmp_path, monkeypatch
 ):
-    """惰性流式化：只有被调度到的批次才真正生成，命中即停时几乎不生成后续候选。"""
+    """惰性流式化：只生成被调度到的单元的候选，命中即停时其余单元不生成。"""
     _install_fakes(client, tmp_path, monkeypatch)
     executor = client.app.state.real_executor
-    executor.settings = dataclasses.replace(executor.settings, decision_batch_size=2)
 
-    generated: list[int] = []
+    streams: list = []
 
     class CountingGenerator(CandidateGenerator):
-        def iter_plan_batches(self, *args, **kwargs):
-            for batch in super().iter_plan_batches(*args, **kwargs):
-                generated.append(len(batch.candidates))
-                yield batch
+        def open_plan_stream(self, *args, **kwargs):
+            stream = super().open_plan_stream(*args, **kwargs)
+            streams.append(stream)
+            return stream
 
     executor.candidate_generator = CountingGenerator()
 
@@ -197,10 +196,11 @@ def test_candidates_are_generated_lazily_not_materialized_up_front(
     assert started.status_code == 200, started.text
     _wait_terminal(client, started.json()["run_id"])
 
-    # 计划候选预算 20、批次 2 => 全部生成需要 10 批；命中即停后只应生成少量批次。
-    assert generated, "至少应生成首批候选"
-    assert sum(generated) <= 6, generated
-    assert len(generated) <= 4, generated
+    assert streams, "启动时应打开候选流"
+    stream = streams[0]
+    # 打开候选流本身不消耗候选；命中即停后只应生成被调度单元的首批候选，
+    # 而不是把计划中的 20 个候选全部物化。
+    assert 0 < stream.total_accepted <= 8, stream.total_accepted
 
 
 def test_stop_on_hit_ends_run_after_first_recovery(client, tmp_path, monkeypatch):

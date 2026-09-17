@@ -1,4 +1,5 @@
 from sage_pass.config import Settings
+import pytest
 
 
 def test_default_cors_origins_allow_vite_development_server(monkeypatch):
@@ -14,6 +15,8 @@ def test_default_cors_origins_allow_vite_development_server(monkeypatch):
     assert settings.s4_generator_id is None
     assert settings.markov_ruleset_path is None
     assert settings.markov_order == 3
+    # 默认与调度粒度一致（1000）；吞吐优先时可显式调大。
+    assert settings.hashcat_stream_batch_size == 1_000
 
 
 def test_pcfg_configuration_from_environment(monkeypatch, tmp_path):
@@ -42,6 +45,12 @@ def test_personalized_generator_configuration_from_environment(monkeypatch):
     monkeypatch.setenv("SAGE_S4_GENERATOR", "hybrid")
 
     assert Settings.from_env().s4_generator_id == "hybrid"
+
+
+def test_hashcat_stream_batch_size_must_be_positive(monkeypatch):
+    monkeypatch.setenv("SAGE_HASHCAT_STREAM_BATCH_SIZE", "0")
+    with pytest.raises(ValueError, match="必须大于 0"):
+        Settings.from_env()
 
 
 def test_cors_preflight_allows_vite_development_server(client):

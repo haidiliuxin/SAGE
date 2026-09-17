@@ -35,7 +35,8 @@
 - 默认 Registry 注册已实现的 `baseline`、`rule`、`pcfg_lite`、`pcfg_full`、`markov`、`context`、`history`、`hybrid`、`pattern_knowledge`，并保留旧 `transfer` 注册名兼容。`passllm` 仍只保留 ID 文档，不注册空实现。
 - `CandidateGenerator` 不再包含 S1～S5 算法分支，只负责 Strategy 映射、Registry 调用、全局去重、合法性过滤、策略/任务预算和分批。
 - `CandidateBatch` 移至 `candidate_types.py`，原 `candidate_generator.CandidateBatch` 导入路径继续兼容，并增加 `generator_id`、`exhausted` 和状态快照。
-- RunRecord 快照升级为 schema v2，记录每项 Strategy 的 `generator_id`；无版本/v1 快照仍按旧批次数组与 `consumed` 游标恢复，未知版本明确失败。
+- RunRecord 快照现为 schema v3：不再保存预先物化的全部候选，而是保存 CandidatePlanStream、Generator 游标、脱敏去重摘要和 Scheduler 检查点；旧 v1/v2 批次数组仍可恢复，未知版本明确失败。
+- RealExecutor 在调度选中 Arm 时才拉取候选，默认以 100000 条大批次启动 Hashcat；持久化 session 使用 `--restore-file-path` 和定期检查点，崩溃恢复时优先执行 `--restore`。
 
 ## Full PCFG 接入
 

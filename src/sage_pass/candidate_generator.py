@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Sequence
+import hashlib
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .candidate_types import CandidateBatch, CandidateRecord
@@ -102,10 +104,39 @@ class CandidateGenerator:
         max_candidates: int = MAX_EXECUTION_CANDIDATES,
     ) -> Iterator[CandidateBatch]:
         """Yield stable, globally deduplicated candidate batches by priority."""
-        if batch_size <= 0:
-            raise ValueError("batch_size 必须大于 0")
-        if max_candidates <= 0 or max_candidates > MAX_EXECUTION_CANDIDATES:
-            raise ValueError(f"max_candidates 必须在 1～{MAX_EXECUTION_CANDIDATES} 之间")
+        stream = self.open_plan_stream(
+            plan,
+            supplied_candidates=supplied_candidates,
+            rule_seeds=rule_seeds,
+            pcfg_seeds=pcfg_seeds,
+            task_context=task_context,
+            historical_passwords=historical_passwords,
+            transfer_patterns=transfer_patterns,
+            max_candidates=max_candidates,
+        )
+        for strategy in sorted(plan.strategies, key=lambda item: item.priority):
+            if strategy.candidate_budget <= 0:
+                continue
+            while stream.next_size(strategy.strategy_id, batch_size) > 0:
+                batch = stream.pull(strategy.strategy_id, batch_size)
+                if batch.records:
+                    yield batch
+
+    def open_plan_stream(
+        self,
+        plan: StrategyPlan,
+        *,
+        supplied_candidates: Iterable[str] = (),
+        rule_seeds: Iterable[str] | None = None,
+        pcfg_seeds: Iterable[str] | None = None,
+        task_context: TaskContext | dict[str, object] | None = None,
+        historical_passwords: Iterable[str] = (),
+        transfer_patterns: Sequence[PatternLike] = (),
+        max_candidates: int = MAX_EXECUTION_CANDIDATES,
+    ) -> "CandidatePlanStream":
+        """Prepare run-local states without consuming any candidate."""
+        if max_candidates <= 0:
+            raise ValueError("max_candidates 必须大于 0")
 
         supplied = tuple(supplied_candidates)
         _validate_source(supplied, "supplied_candidates")
@@ -141,8 +172,7 @@ class CandidateGenerator:
             *self.year_suffixes,
         ))
 
-        seen: set[str] = set()
-        total = 0
+        arms: dict[StrategyId, _StreamArm] = {}
         for strategy in sorted(plan.strategies, key=lambda item: item.priority):
             if strategy.candidate_budget <= 0:
                 continue
@@ -173,19 +203,13 @@ class CandidateGenerator:
                 personalized_years=personalized_years,
                 symbol_suffixes=self.symbol_suffixes,
             ))
-            yield from self._iter_strategy_batches(
+            arms[strategy.strategy_id] = _StreamArm(
                 generator_id=generator_id,
                 generator=generator,
                 state=state,
-                strategy_budget=strategy.candidate_budget,
-                batch_size=batch_size,
-                max_candidates=max_candidates,
-                seen=seen,
-                total_so_far=total,
+                budget=strategy.candidate_budget,
             )
-            total = len(seen)
-            if total >= max_candidates:
-                return
+        return CandidatePlanStream(arms, max_candidates=max_candidates)
 
     def _generator_id_for_strategy(
         self,
@@ -203,6 +227,11 @@ class CandidateGenerator:
         if has_historical_passwords:
             return "history"
         return "context"
+
+    def restore_plan_stream(
+        self, snapshot: Mapping[str, object]
+    ) -> "CandidatePlanStream":
+        return CandidatePlanStream.restore(self.registry, snapshot)
 
     def build_execute_candidates(self, plan: StrategyPlan, **kwargs: object) -> list[str]:
         """Build the flat string list accepted by ExecutionRequest."""
@@ -335,3 +364,218 @@ def _is_valid_candidate(value: object) -> bool:
     except UnicodeEncodeError:
         return False
     return True
+
+
+@dataclass(slots=True)
+class _StreamArm:
+    generator_id: str
+    generator: GeneratorProtocol
+    state: GeneratorState
+    budget: int
+    accepted: int = 0
+
+
+class CandidatePlanStream:
+    """On-demand, cross-generator deduplicated candidate stream."""
+
+    SCHEMA_VERSION = 2
+
+    def __init__(
+        self,
+        arms: Mapping[StrategyId, _StreamArm],
+        *,
+        max_candidates: int,
+        seen_digests: Iterable[str] = (),
+        total_accepted: int = 0,
+    ) -> None:
+        self._arms = dict(arms)
+        self.max_candidates = max_candidates
+        self._dedupe = _DedupeIndex(
+            max_entries=max_candidates,
+            digests=seen_digests,
+        )
+        self.total_accepted = total_accepted
+
+    def generator_id(self, strategy_id: StrategyId | str) -> str:
+        return self._arm(strategy_id).generator_id
+
+    def next_size(self, strategy_id: StrategyId | str, limit: int) -> int:
+        if limit <= 0:
+            raise ValueError("limit 必须大于 0")
+        arm = self._arm(strategy_id)
+        if arm.generator.exhausted(arm.state):
+            return 0
+        return max(0, min(
+            limit,
+            arm.budget - arm.accepted,
+            self.max_candidates - self.total_accepted,
+        ))
+
+    def next_sizes(self, limit: int) -> dict[str, int]:
+        return {
+            strategy_id.value: self.next_size(strategy_id, limit)
+            for strategy_id in self._arms
+        }
+
+    def pull(
+        self, strategy_id: StrategyId | str, limit: int
+    ) -> CandidateBatch:
+        arm = self._arm(strategy_id)
+        output: list[CandidateRecord] = []
+        while len(output) < limit and self.next_size(strategy_id, limit) > 0:
+            capacity = min(limit - len(output), self.next_size(strategy_id, limit))
+            raw = arm.generator.next_batch(arm.state, capacity)
+            if not raw.records and not raw.exhausted:
+                raise RuntimeError(
+                    f"生成器 {arm.generator_id!r} 未耗尽但返回了空批次"
+                )
+            for record in raw.records:
+                if not _is_valid_candidate(record.value):
+                    continue
+                accepted = self._dedupe.add(record.value)
+                if not accepted:
+                    continue
+                output.append(record)
+                arm.accepted += 1
+                self.total_accepted += 1
+                if len(output) >= limit:
+                    break
+        return _pipeline_batch(
+            arm.generator_id,
+            arm.state.strategy_id,
+            output,
+            exhausted=self.next_size(strategy_id, max(1, limit)) == 0,
+            snapshot=arm.generator.snapshot(arm.state),
+        )
+
+    def snapshot(self) -> GeneratorSnapshot:
+        return {
+            "schema_version": self.SCHEMA_VERSION,
+            "max_candidates": self.max_candidates,
+            "total_accepted": self.total_accepted,
+            # Dedupe is persisted as fixed-width digests, not candidate strings.
+            # Its size is bounded by max_candidates and therefore by the run
+            # budget, so long-running streams cannot grow without an explicit
+            # budget increase.
+            "dedupe": self._dedupe.snapshot(),
+            "seen_digests": self._dedupe.sorted_digests(),
+            "arms": {
+                strategy_id.value: {
+                    "generator_id": arm.generator_id,
+                    "budget": arm.budget,
+                    "accepted": arm.accepted,
+                    "generator_state": arm.generator.snapshot(arm.state),
+                }
+                for strategy_id, arm in self._arms.items()
+            },
+        }
+
+    @classmethod
+    def restore(
+        cls,
+        registry: GeneratorRegistry,
+        snapshot: Mapping[str, object],
+    ) -> "CandidatePlanStream":
+        version = int(snapshot.get("schema_version", 0))
+        if version not in {1, cls.SCHEMA_VERSION}:
+            raise ValueError("不支持的 CandidatePlanStream 快照版本")
+        raw_arms = snapshot.get("arms")
+        if not isinstance(raw_arms, Mapping):
+            raise ValueError("CandidatePlanStream arms 快照无效")
+        arms: dict[StrategyId, _StreamArm] = {}
+        for raw_strategy_id, raw_arm in raw_arms.items():
+            if not isinstance(raw_arm, Mapping):
+                raise ValueError("CandidatePlanStream arm 快照无效")
+            strategy_id = StrategyId(str(raw_strategy_id))
+            generator_id = str(raw_arm["generator_id"])
+            generator = registry.get(generator_id)
+            raw_state = raw_arm.get("generator_state")
+            if not isinstance(raw_state, Mapping):
+                raise ValueError("CandidatePlanStream generator_state 无效")
+            arms[strategy_id] = _StreamArm(
+                generator_id=generator_id,
+                generator=generator,
+                state=generator.restore(raw_state),
+                budget=int(raw_arm["budget"]),
+                accepted=int(raw_arm.get("accepted", 0)),
+            )
+        raw_dedupe = snapshot.get("dedupe")
+        raw_seen = (
+            raw_dedupe.get("digests", [])
+            if isinstance(raw_dedupe, Mapping)
+            else snapshot.get("seen_digests", [])
+        )
+        if not isinstance(raw_seen, list):
+            raise ValueError("CandidatePlanStream seen_digests 无效")
+        return cls(
+            arms,
+            max_candidates=int(snapshot["max_candidates"]),
+            seen_digests=(str(item) for item in raw_seen),
+            total_accepted=int(snapshot.get("total_accepted", 0)),
+        )
+
+    def _arm(self, strategy_id: StrategyId | str) -> _StreamArm:
+        prepared = (
+            strategy_id if isinstance(strategy_id, StrategyId)
+            else StrategyId(strategy_id)
+        )
+        try:
+            return self._arms[prepared]
+        except KeyError as exc:
+            raise KeyError(f"unknown stream strategy: {prepared.value}") from exc
+
+
+def _candidate_digest(value: str) -> str:
+    # 128 bits keeps the in-memory/snapshot footprint half the size of SHA-256
+    # while remaining effectively collision-free at the configured 100k scale.
+    return hashlib.blake2b(value.encode("utf-8"), digest_size=16).hexdigest()
+
+
+class _DedupeIndex:
+    """Bounded exact digest set used by streaming candidate plans."""
+
+    ALGORITHM = "blake2b-128"
+
+    def __init__(
+        self,
+        *,
+        max_entries: int,
+        digests: Iterable[str] = (),
+    ) -> None:
+        if max_entries <= 0:
+            raise ValueError("dedupe max_entries 必须大于 0")
+        self.max_entries = max_entries
+        self._digests: set[str] = set()
+        self._legacy_sha256_digests: set[str] = set()
+        for digest in digests:
+            prepared = str(digest)
+            if not prepared:
+                continue
+            if len(self._digests) >= self.max_entries:
+                raise ValueError("CandidatePlanStream 去重快照超过候选预算")
+            if len(prepared) == 64:
+                self._legacy_sha256_digests.add(prepared)
+            self._digests.add(prepared)
+
+    def add(self, value: str) -> bool:
+        digest = _candidate_digest(value)
+        legacy_digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+        if digest in self._digests or legacy_digest in self._legacy_sha256_digests:
+            return False
+        if len(self._digests) >= self.max_entries:
+            return False
+        self._digests.add(digest)
+        return True
+
+    def sorted_digests(self) -> list[str]:
+        return sorted(self._digests)
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "algorithm": self.ALGORITHM,
+            "max_entries": self.max_entries,
+            "count": len(self._digests),
+            "digest_bytes": 16,
+            "estimated_memory_bytes": len(self._digests) * 16,
+            "digests": self.sorted_digests(),
+        }

@@ -39,16 +39,16 @@ def _parse_scheduler_type(raw: str) -> SchedulerType:
         ) from exc
 
 
-def _parse_batch_size(raw: str) -> int:
-    """决策批次大小：批越大，每批的进程启动开销摊得越薄。"""
+def _parse_batch_size(raw: str, variable: str = "SAGE_DECISION_BATCH_SIZE") -> int:
+    """批次大小：批越大，每批的 hashcat 进程启动开销摊得越薄。"""
     try:
         value = int(raw)
     except ValueError as exc:
-        raise RuntimeError(
-            f"SAGE_DECISION_BATCH_SIZE={raw!r} 不是整数"
-        ) from exc
-    if value <= 0 or value > 100_000:
-        raise RuntimeError("SAGE_DECISION_BATCH_SIZE 必须在 1～100000 之间")
+        raise ValueError(f"{variable}={raw!r} 不是整数") from exc
+    if value <= 0:
+        raise ValueError(f"{variable} 必须大于 0")
+    if value > 100_000:
+        raise ValueError(f"{variable} 不能超过 100000")
     return value
 
 
@@ -86,8 +86,15 @@ class Settings:
     office2john_path: str = "office2john"
     extraction_timeout_seconds: float = 30.0
     decision_batch_size: int = 1_000
+    # 流式调度每次决策的候选上限：默认与调度粒度一致，保证 Bandit 能在单元内部
+    # 重新分配预算；吞吐优先时可调大（如 100000）以摊薄 hashcat 进程启动开销。
+    hashcat_stream_batch_size: int = 1_000
     wordlist_path: Path | None = None
     stop_on_hit: bool = False
+
+    def __post_init__(self) -> None:
+        if self.hashcat_stream_batch_size <= 0:
+            raise ValueError("hashcat_stream_batch_size 必须大于 0")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -172,6 +179,13 @@ class Settings:
             ),
             decision_batch_size=_parse_batch_size(
                 os.getenv("SAGE_DECISION_BATCH_SIZE", "1000")
+            ),
+            hashcat_stream_batch_size=_parse_batch_size(
+                os.getenv(
+                    "SAGE_HASHCAT_STREAM_BATCH_SIZE",
+                    os.getenv("SAGE_DECISION_BATCH_SIZE", "1000"),
+                ),
+                "SAGE_HASHCAT_STREAM_BATCH_SIZE",
             ),
             wordlist_path=(
                 _as_path(value)
