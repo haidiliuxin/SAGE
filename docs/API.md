@@ -58,7 +58,7 @@ ExecutionRequest.hashcat_mode
 ### 目标提取器（TargetExtractor）
 
 - 统一接口：`supports(target_type)` + `extract(target_type, content, file_path) -> ExtractedTarget`；
-- 已实现：`HashTargetExtractor`（行内 Hash）、`ZipTargetExtractor`（zip2john → `$zip2$`，模式 13600）；
+- 已实现：`HashTargetExtractor`（行内 Hash）、`ZipTargetExtractor`（zip2john → `$zip2$` 走模式 13600；`$pkzip2$` 即传统 PKZIP/ZipCrypto，按结构选 17200 单文件压缩 / 17210 单文件未压缩 / 17225 多文件与混合 / 17230 仅校验和）；
 - `PdfTargetExtractor`：pdf2john 提取，按 `$pdf$` 版本映射 10400 / 10500 / 10600 / 10700 / 10510，未知版本或非加密 PDF 返回明确 `422`；
 - `OfficeTargetExtractor`：office2john 提取，按哈希签名映射 `$oldoffice$0/1` → 9700、`$oldoffice$3/4` → 9800、`$office$*2007*` → 9400、`*2010*` → 9500、`*2013*` → 9600，未识别签名返回明确 `422`；
 - 三者共用 `SAGE_EXTRACTION_TIMEOUT_SECONDS` 超时；工具缺失时返回提示信息而非静默降级。
@@ -260,8 +260,8 @@ Hash 任务返回示例：
 分析规则（第 2 周）：
 
 - Hash 文本任务优先使用 `known_algorithm`；未提供时按常见 Hash 形态做规则识别；
-- **ZIP 文件任务**（第 2 周接入）：调用 zip2john 提取加密目标，识别成功时返回 `algorithm: "zip-aes"`、`salt: true`、`verification_cost: "medium"`；
-- zip2john 未安装/超时/仅传统 PKZIP 时**不失败**，返回 `unknown` 算法并在 `warnings` 中说明降级原因，mock 链路仍可继续；
+- **ZIP 文件任务**（第 2 周接入，第 3 周扩展传统 PKZIP）：调用 zip2john 提取加密目标，WinZip AES 返回 `algorithm: "zip-aes"`，传统 PKZIP（ZipCrypto）返回 `algorithm: "zip-legacy"`，两者都是 `salt: true`、`verification_cost: "medium"`；
+- zip2john 未安装/超时/未加密时**不失败**，返回 `unknown` 算法并在 `warnings` 中说明降级原因，mock 链路仍可继续；同一压缩包内若混有多种传统 PKZIP 模式，按多数模式执行并在 `warnings` 中说明未纳入的目标数；
 - `pdf`、`office` 仍为元数据级 PRIR，尚未接入真实解析。
 
 ### 生成策略计划
@@ -326,7 +326,7 @@ Mock（第一周链路，无需候选）：
 字段说明：
 
 - `candidates`：可选的优先补充候选，最多 100000 条，每条为 1～1024 字符的单行文本；不提供时，后端根据策略计划自动生成 S1～S5 候选；
-- `hashcat_mode`：可选。缺省时 Hash 任务由 `known_algorithm` 自动映射（bcrypt=3200、sha256=1400、zip-aes=13600 等），ZIP 任务默认 13600；无法确定时返回 `422`；
+- `hashcat_mode`：可选。缺省时 Hash 任务由 `known_algorithm` 自动映射（bcrypt=3200、sha256=1400、zip-aes=13600、zip-legacy=17225 等），ZIP 任务按 zip2john 的 `$zip2$` / `$pkzip2$` 结构自动判定（13600 / 17200 / 17210 / 17225 / 17230）；无法确定时返回 `422`；
 - `timeout`：可选，覆盖策略时间预算的每策略秒数上限。
 
 返回：

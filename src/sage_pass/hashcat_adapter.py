@@ -27,6 +27,16 @@ HASHCAT_MODES = {
     "bcrypt": 3200,
     "winzip": 13600,
     "zip-aes": 13600,
+    # 传统 PKZIP（ZipCrypto）。精确模式由 zip2john 的 $pkzip2$ 结构在提取时判定
+    # （17200 单文件压缩 / 17210 单文件未压缩 / 17225 通吃 / 17230 仅校验和），
+    # 这里的条目用于调用方显式声明算法名时的回退。
+    "zip-legacy": 17225,
+    "zipcrypto": 17225,
+    "pkzip2": 17225,
+    "pkzip": 17225,
+    "zip-pkzip-compressed": 17200,
+    "zip-pkzip-uncompressed": 17210,
+    "zip-pkzip-checksum-only": 17230,
     # Argon2 家族（模式号取自本机 hashcat -hh：34000 Argon2 / 70000 Argon2id bridged）
     "argon2": 34000,
     "argon2i": 34000,
@@ -58,6 +68,12 @@ ALGORITHM_ALIASES = {
     "winzip-aes": "zip-aes",
     "zip-aes": "zip-aes",
     "zipaes": "zip-aes",
+    "zip-legacy": "zip-legacy",
+    "zipcrypto": "zip-legacy",
+    "zip-crypto": "zip-legacy",
+    "pkzip": "zip-legacy",
+    "pkzip2": "zip-legacy",
+    "zip-pkzip": "zip-legacy",
 }
 
 

@@ -78,7 +78,7 @@ class HashTargetExtractor:
 
 
 class ZipTargetExtractor:
-    """WinZip AES ZIP：调用 zip2john 提取 `$zip2$`（hashcat 13600）。"""
+    """ZIP 目标：经 zip2john 提取 WinZip AES（`$zip2$`，13600）或传统 PKZIP（`$pkzip2$`，17200/17210/17225/17230）。"""
 
     name = "zip"
 
@@ -118,7 +118,8 @@ class ZipTargetExtractor:
             hashes=extracted.hashes,
             source=self.name,
             hashcat_mode=extracted.hashcat_mode,
-            algorithm="zip-aes",
+            algorithm=getattr(extracted, "algorithm", None) or "zip-aes",
+            warnings=tuple(getattr(extracted, "warnings", ()) or ()),
         )
 
 

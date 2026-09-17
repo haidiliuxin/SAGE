@@ -187,6 +187,59 @@ def test_real_execution_zip_winzip_recovery(client, tmp_path, monkeypatch):
     assert recovered["target"].startswith("$zip2$")
 
 
+def test_real_execution_zip_legacy_pkzip_recovery(client, tmp_path, monkeypatch):
+    """传统 PKZIP（ZipCrypto）：应解析为 zip-legacy 并按 17200 真实执行。"""
+    log_path = tmp_path / "fake-hashcat.log"
+    _install_fakes(
+        client,
+        tmp_path,
+        monkeypatch,
+        FAKE_ZIP2JOHN_KIND="pkzip",
+        FAKE_HASHCAT_LOG=str(log_path),
+    )
+    uploaded = client.post(
+        "/api/files",
+        files={"file": ("legacy.zip", b"PK\x03\x04fake", "application/zip")},
+    )
+    assert uploaded.status_code == 201
+    created = client.post(
+        "/api/tasks",
+        json={
+            "name": "传统PKZIP真实执行",
+            "target": {"type": "zip", "content": None, "file_id": uploaded.json()["file_id"]},
+            "known_algorithm": None,
+            "time_budget": 60,
+            "candidate_budget": 30,
+            "context": {},
+        },
+    )
+    task_id = created.json()["task_id"]
+
+    analyzed = client.post(f"/api/tasks/{task_id}/analyze")
+    assert analyzed.status_code == 200, analyzed.text
+    prir = analyzed.json()
+    assert prir["algorithm"] == "zip-legacy"
+    assert prir["verification_cost"] == "medium"
+
+    assert client.post(f"/api/tasks/{task_id}/plan").status_code == 200
+    started = client.post(
+        f"/api/tasks/{task_id}/execute",
+        json={"mode": "real", "candidates": ["passw0rd", "123456"]},
+    )
+    assert started.status_code == 200, started.text
+    run_id = started.json()["run_id"]
+    _wait_terminal(client, run_id)
+    result = client.get(f"/api/runs/{run_id}/result").json()
+
+    assert result["status"] == "completed"
+    assert result["total_recovered"] == 1
+    recovered = result["recovered_items"][0]
+    assert recovered["plaintext"] == "passw0rd"
+    assert recovered["target"].startswith("$pkzip2$")
+    # 传给 hashcat 的模式必须是传统 PKZIP 单文件压缩模式。
+    assert '"--hash-type", "17200"' in log_path.read_text(encoding="utf-8")
+
+
 def test_real_execution_timeout_auto_stops(client, tmp_path, monkeypatch):
     _install_fakes(client, tmp_path, monkeypatch, FAKE_HASHCAT_SLOW="8")
     task_id = _create_hash_task(client, candidate_budget=5)

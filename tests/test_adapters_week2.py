@@ -206,12 +206,30 @@ def test_zip_extractor_extracts_winzip_aes_hash(tmp_path, monkeypatch):
     assert extracted.hashcat_mode == 13600
 
 
-def test_zip_extractor_rejects_legacy_pkzip(tmp_path, monkeypatch):
+def test_zip_extractor_supports_legacy_pkzip(tmp_path, monkeypatch):
     extractor = fake_zip2john(tmp_path, monkeypatch, kind="pkzip")
-    with pytest.raises(AppError) as excinfo:
-        extractor.extract(_zip_file(tmp_path))
-    assert excinfo.value.status_code == 422
-    assert "仅支持 WinZip AES" in excinfo.value.message
+    extracted = extractor.extract(_zip_file(tmp_path))
+    assert len(extracted.hashes) == 1
+    assert extracted.hashes[0].startswith("$pkzip2$")
+    assert extracted.hashcat_mode == 17200
+    assert extracted.algorithm == "zip-legacy"
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected_mode"),
+    [
+        ("pkzip_stored", 17210),
+        ("pkzip_multi", 17225),
+        ("pkzip_checksum", 17230),
+    ],
+)
+def test_zip_extractor_maps_legacy_variants_to_hashcat_modes(
+    tmp_path, monkeypatch, kind, expected_mode
+):
+    extractor = fake_zip2john(tmp_path, monkeypatch, kind=kind)
+    extracted = extractor.extract(_zip_file(tmp_path))
+    assert extracted.hashcat_mode == expected_mode
+    assert extracted.algorithm == "zip-legacy"
 
 
 def test_zip_extractor_reports_empty_extraction(tmp_path, monkeypatch):
