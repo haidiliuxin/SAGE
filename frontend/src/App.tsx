@@ -579,7 +579,7 @@ function App() {
                 <div className="signal-orbit"><span className="orbit-core">SAGE</span><i/><i/><i/></div>
                 <div className="visual-metrics">
                   <div><small>任务画像</small><strong>PRIR</strong></div>
-                  <div><small>策略空间</small><strong>S1—S4</strong></div>
+                  <div><small>策略空间</small><strong>S1—S5</strong></div>
                   <div><small>执行模式</small><strong>MOCK / REAL</strong></div>
                 </div>
               </div>
@@ -606,7 +606,7 @@ function App() {
           <section className="page form-page">
             <div className="page-title">
               <div><span className="section-kicker">NEW ASSESSMENT</span><h1>创建安全评测</h1></div>
-              <p>任务创建后将调用后端生成 PRIR、编排 S1～S4 策略，并按所选模式执行。</p>
+              <p>任务创建后将调用后端生成 PRIR、编排 S1 至 S5 策略，并按所选模式执行。</p>
             </div>
             <form onSubmit={runFlow} className="assessment-form">
               <div className="form-section">
