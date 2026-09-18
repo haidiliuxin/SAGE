@@ -124,6 +124,37 @@ def test_s4_is_rejected_when_profile_has_no_context():
     assert [item.strategy_id for item in plan.strategies] == ["S1"]
 
 
+def test_llm_selected_s2_receives_effective_local_rule_parameters():
+    response = valid_response()
+    response["strategies"] = [
+        response["strategies"][0],
+        {
+            "strategy_id": "S2",
+            "priority": 2,
+            "time_budget": 30,
+            "candidate_budget": 3_000,
+            "reason": "扩展常见变形",
+            "parameters": {},
+        },
+    ]
+    planner = LLMPlanner(FakeGateway(response), model="test-model")
+
+    result = planner.plan(make_prir())
+
+    assert result.planner_type == "llm"
+    s2 = next(item for item in result.strategies if item.strategy_id == "S2")
+    assert s2.candidate_budget == 3_000
+    assert s2.parameters == {
+        "capitalize_first": True,
+        "all_upper": True,
+        "all_lower": True,
+        "common_number_suffix": True,
+        "year_suffix": True,
+        "common_substitution": True,
+        "symbol_suffix": True,
+    }
+
+
 def test_non_whitelisted_llm_strategy_degrades_to_mock():
     response = valid_response()
     response["strategies"] = [

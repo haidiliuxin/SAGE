@@ -136,6 +136,16 @@ STRATEGY_PARAMETER_RULES: dict[StrategyId, dict[str, ParameterRule]] = {
     },
 }
 
+S2_BOOLEAN_RULE_PARAMETERS = frozenset({
+    "capitalize_first",
+    "all_upper",
+    "all_lower",
+    "common_number_suffix",
+    "year_suffix",
+    "common_substitution",
+    "symbol_suffix",
+})
+
 PASSWORD_TARGETS = frozenset({
     TargetType.HASH,
     TargetType.ZIP,
@@ -312,6 +322,17 @@ class PolicyValidator:
                         parameter=name,
                     )
                 )
+        if (
+            strategy.strategy_id == StrategyId.S2
+            and not _has_effective_s2_rule(strategy.parameters)
+        ):
+            issues.append(
+                PolicyIssue(
+                    "S2_RULE_REQUIRED",
+                    "S2 进入计划时必须启用至少一项规则参数",
+                    strategy_id=StrategyId.S2.value,
+                )
+            )
 
     def _validate_budgets(
         self, prir: PRIR, plan: StrategyPlan, issues: list[PolicyIssue]
@@ -337,3 +358,12 @@ class PolicyValidator:
                     ),
                 )
             )
+
+
+def _has_effective_s2_rule(parameters: dict[str, object]) -> bool:
+    rule_files = parameters.get("hashcat_rule_files")
+    if isinstance(rule_files, list | tuple) and any(
+        isinstance(item, str) and bool(item.strip()) for item in rule_files
+    ):
+        return True
+    return any(parameters.get(name) is True for name in S2_BOOLEAN_RULE_PARAMETERS)

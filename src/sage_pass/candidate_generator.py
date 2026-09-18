@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -41,6 +42,7 @@ DEFAULT_YEAR_SUFFIXES = (
     "1999", "1998",
 )
 DEFAULT_SYMBOL_SUFFIXES = ("!", "@", "#")
+_PERSONALIZED_YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 
 class CandidateGenerator:
     """Registry-backed pipeline with shared validation, budgets, and dedupe."""
@@ -165,10 +167,23 @@ class CandidateGenerator:
             if prepared_context is not None
             else ()
         )
+        birth_years = (
+            (str(prepared_context.birth_year),)
+            if prepared_context is not None
+            and prepared_context.birth_year is not None
+            else ()
+        )
+        historical_years = _stable_unique(
+            year
+            for password in prepared_history
+            for year in _PERSONALIZED_YEAR_RE.findall(password)
+        )
         effective_years = context_years or self.year_suffixes
         personalized_years = _stable_unique((
-            str(datetime.now(timezone.utc).year),
+            *birth_years,
             *context_years,
+            *historical_years,
+            str(datetime.now(timezone.utc).year),
             *self.year_suffixes,
         ))
 
