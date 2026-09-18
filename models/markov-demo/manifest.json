@@ -1,0 +1,44 @@
+{
+  "model_type": "omen-markov",
+  "order": 3,
+  "max_level": 10,
+  "corpus": {
+    "data\\corpus\\demo-passwords.txt": 8256,
+    "data\\wordlists\\zh-base.txt": 99
+  },
+  "corpus_lines": 8355,
+  "corpus_unique": 8256,
+  "trained_at": "2026-09-19T01:00:17",
+  "files": {
+    "alphabet.txt": {
+      "sha256": "ab2eff1f97608c91d255953da9327afc71f341747d529931cfdd9b4c0671e9df",
+      "lines": 212,
+      "bytes": 714
+    },
+    "config.txt": {
+      "sha256": "d4185399ba30197a16759be4ee9ea29b7f35c321721e3c74d03540850d59c43a",
+      "lines": 3,
+      "bytes": 47
+    },
+    "IP.level": {
+      "sha256": "cb82dc1ce18b7e4eabf307c2232f1f79fe67e2e9d5df491c4c8d6602f9042af7",
+      "lines": 476,
+      "bytes": 4345
+    },
+    "EP.level": {
+      "sha256": "356a2fdb7928e1451de3923f572175908a3ddeee2156acc2e268f0ae10d9bf5e",
+      "lines": 472,
+      "bytes": 3644
+    },
+    "CP.level": {
+      "sha256": "79c419e8931bcc31b13cf6d7c3d7b8aa3ba6f974098b7ab6c11a74a9ef589c56",
+      "lines": 2446,
+      "bytes": 20537
+    },
+    "LN.level": {
+      "sha256": "8f1b1289faf820e955b959c79b0e07ebbb20eafd012d348580066a036e45354a",
+      "lines": 14,
+      "bytes": 30
+    }
+  }
+}

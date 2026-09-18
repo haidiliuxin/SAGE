@@ -184,7 +184,13 @@ def test_personalized_year_order_prefers_birth_related_and_history_years():
     assert years == expected
 
 
-def test_i3_stream_generates_failed_case_target_in_first_s4_batch():
+def test_i3_stream_generates_failed_case_target_in_s4_window():
+    """回归：此前失败案例（旧口令 Lisi@2000 → 目标 Lisi@2000!）必须落在 S4 候选空间内。
+
+    注意：S4（hybrid）先输出通用个人信息组合，再输出旧口令迁移候选；
+    因此这里在 S4 的候选窗口（默认取前 4000 条）内断言，而不绑定"首批"，
+    以免个人信息组合规模变化让断言失效。
+    """
     plan = StrategyPlan(
         task_id="T-I3-REGRESSION",
         planner_type=PlannerType.RULE,
@@ -219,7 +225,7 @@ def test_i3_stream_generates_failed_case_target_in_first_s4_batch():
         historical_passwords=("Lisi@2000", "lisi200008", "2000lisi!"),
     )
 
-    candidates = stream.pull(StrategyId.S4, 1_000).candidates
+    candidates = stream.pull(StrategyId.S4, 4_000).candidates
     target = "188253ebe8124b5652421683b2ed29f1"
 
     assert "Lisi@2000!" in candidates

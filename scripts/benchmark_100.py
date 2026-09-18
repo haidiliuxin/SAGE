@@ -11,7 +11,9 @@
 - 每个口令建一个 MD5 目标任务，走 分析 → 规划 → 真实执行（命中即停），
   记录是否命中、由哪个策略命中、测试候选数、耗时、停止原因；
 - 对未命中的案例，逐单元拉取候选流判断该口令是否落在候选空间内，
-  区分"候选空间未覆盖（生成器能力问题）"与"覆盖但未命中（预算/调度问题）"。
+  区分"候选空间未覆盖（生成器能力问题）"与"覆盖但未命中（预算/调度问题）"；
+  原生单元（词表 × 规则 / 掩码 / 词表 × 掩码）由 hashcat 自己枚举，Python 流里看不到，
+  因此按 keyspace.py 的键空间模型单独记录（它们的覆盖由 hashcat 实测决定）。
 
 输出：docs/experiments/benchmark-100-<时间戳>.csv 与同名 .md 报告。
 """
@@ -31,13 +33,31 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HASHCAT = r"F:\SA\tools\hashcat-7.1.2\hashcat.exe"
 RULES = r"F:\SA\tools\hashcat-7.1.2\rules\best66.rule"
+# 规则集：best66（大小写/数字/符号后缀）+ d3ad0ne（3.4 万条组合规则）。
+# hashcat 对多个 -r 做**规则链**（乘积）：66 × 34111 ≈ 225 万条/词，81 词 ≈ 1.8 亿键，
+# 在本机约 7 秒可跑完。实测覆盖：best66 = 16/100，best66×d3ad0ne = 51/100，
+# best66×dive（66 × 98670 ≈ 6.5M/词，5.3 亿键，需 20 秒以上）= 55/100；
+# 注意 hashcat 的规则链很吃主机内存，三份以上规则文件会报
+# "Not enough allocatable memory (RAM) for this ruleset"。
+RULE_FILES = (
+    RULES,
+    r"F:\SA\tools\hashcat-7.1.2\rules\d3ad0ne.rule",
+)
 JOHN_RUN = r"F:\SA\tools\john\john-1.9.0-jumbo-1-win64\run"
 WORK = REPO_ROOT / "data" / "benchmark"
 
-TIME_BUDGET = 30
-CANDIDATE_BUDGET = 20_000
+# 时间预算：规则链键空间大（2.1 亿键 ≈ 9 秒纯 GPU 时间 + 3 秒启动），
+# 30 秒的整轮预算会把 S1 的份额（20% = 6 秒）压到跑不完。
+TIME_BUDGET = 60
+# 原生攻击（词表 × 规则链 / 掩码 / 词表 × 掩码）由 hashcat 自己枚举候选：
+# 候选预算必须容纳这些键空间，否则计划层会裁掉它们。
+CANDIDATE_BUDGET = 1_000_000_000
+# 单批次候选粒度：默认 1000 会让每次 hashcat 启动（约 3 秒）只测 1000 条候选，
+# 吞吐评测应放大以摊薄进程启动开销（Python 候选单元一次提交整段候选）。
+STREAM_BATCH_SIZE = 100_000
 MASK_LADDER = "?d?d?d?d,?l?l?l?l,?l?l?l?l?d?d"
-HYBRID_MASKS = "?d?d,!"
+# 混合掩码：词 + 短后缀（?d?d / !）与词 + 4 位年份（?d?d?d?d，覆盖 summer2023 这类）。
+HYBRID_MASKS = "?d?d?d?d,?d?d,!"
 
 # ----------------------------------------------------------------- 语料
 # 词表基础词（评测"词表 × 规则"这条路径能覆盖多少）
@@ -150,6 +170,40 @@ def write_wordlist(path: Path) -> int:
     return len(words)
 
 
+def native_keyspaces(
+    parameters_by_strategy: dict[str, dict],
+    *,
+    wordlist_lines: int,
+) -> dict[str, int]:
+    """各原生单元的键空间（hashcat 会实际测试的候选数）。
+
+    - S1：词表条数 × 规则条数（词表 × 规则）
+    - S6：掩码键空间之和
+    - S7：词表条数 × 混合掩码键空间之和
+    """
+    units: dict[str, int] = {}
+    from sage_pass.keyspace import (  # noqa: PLC0415
+        masks_keyspace,
+        rule_chain_count,
+    )
+
+    s1_rules = parameters_by_strategy.get("S1", {}).get("hashcat_rule_files") or []
+    if wordlist_lines > 0 and s1_rules:
+        # 多个规则文件是规则链（乘积），不是并集。
+        units["S1"] = wordlist_lines * rule_chain_count(s1_rules)
+    masks = parameters_by_strategy.get("S6", {}).get("hashcat_masks") or []
+    if masks:
+        size = masks_keyspace(masks)
+        if size is not None:
+            units["S6"] = size
+    hybrid = parameters_by_strategy.get("S7", {}).get("hashcat_hybrid_mask") or []
+    if hybrid and wordlist_lines > 0:
+        size = masks_keyspace(hybrid)
+        if size is not None:
+            units["S7"] = wordlist_lines * size
+    return units
+
+
 # ----------------------------------------------------------------- 评测
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -177,6 +231,19 @@ def main() -> int:
     os.environ["SAGE_SCHEDULER_TYPE"] = "heuristic_bandit"
     os.environ["SAGE_WORDLIST_PATH"] = str(wordlist_path)
     os.environ["SAGE_RULES_PATH"] = RULES
+    # 词表 × 规则：多个规则文件（逗号分隔），S1 的原生词表作业会带 -r。
+    os.environ["SAGE_WORDLIST_RULES"] = ",".join(RULE_FILES)
+    os.environ["SAGE_DECISION_BATCH_SIZE"] = str(STREAM_BATCH_SIZE)
+    os.environ["SAGE_HASHCAT_STREAM_BATCH_SIZE"] = str(STREAM_BATCH_SIZE)
+    os.environ.setdefault(
+        "SAGE_SEED_WORDLISTS",
+        str(REPO_ROOT / "data" / "wordlists" / "zh-base.txt"),
+    )
+    markov_model = REPO_ROOT / "models" / "markov-demo"
+    if markov_model.is_dir():
+        # 本地训练的 OMEN/Markov 模型（scripts/train_markov.py 产出）。
+        os.environ["SAGE_S3_GENERATOR"] = "markov"
+        os.environ["SAGE_MARKOV_RULESET_PATH"] = str(markov_model)
     os.environ["SAGE_MASK_LADDER"] = MASK_LADDER
     os.environ["SAGE_HYBRID_MASKS"] = HYBRID_MASKS
     os.environ["SAGE_STOP_ON_HIT"] = "true"
@@ -185,6 +252,7 @@ def main() -> int:
     from fastapi.testclient import TestClient  # noqa: PLC0415
 
     from sage_pass.candidate_generator import CandidateGenerator  # noqa: PLC0415
+    from sage_pass.keyspace import file_line_count  # noqa: PLC0415
     from sage_pass.main import app  # noqa: PLC0415
     from sage_pass.schemas import StrategyPlan, TaskContext  # noqa: PLC0415
 
@@ -193,6 +261,7 @@ def main() -> int:
         cases = cases[: args.limit]
     print(f"词表基础词 {word_count} 条；评测口令 {len(cases)} 条", flush=True)
     print(f"配置：时间预算 {TIME_BUDGET}s / 候选预算 {CANDIDATE_BUDGET}；"
+          f"批大小 {STREAM_BATCH_SIZE}；规则 {','.join(Path(r).name for r in RULE_FILES)}；"
           f"掩码 {MASK_LADDER}；混合 {HYBRID_MASKS}", flush=True)
 
     rows: list[dict] = []
@@ -212,7 +281,8 @@ def main() -> int:
             row = {
                 "id": case["id"], "category": case["category"], "password": case["password"],
                 "recovered": False, "hit_strategy": "", "tested": 0, "seconds": 0.0,
-                "stop_reason": "", "space_hit_arms": "", "reason": "", "error": "",
+                "stop_reason": "", "space_hit_arms": "", "native_units": "",
+                "reason": "", "error": "",
             }
             started = time.monotonic()
             try:
@@ -258,6 +328,18 @@ def main() -> int:
                     f"{item.strategy_id.value}:{produced_by_arm.get(item.strategy_id.value, 0)}"
                     for item in plan.strategies
                 )
+                # 原生单元（hashcat 自己枚举）：Python 流里看不到，按键空间单独记录，
+                # 避免把它们误判成"生成器能力不足"。
+                native_units = native_keyspaces(
+                    {item.strategy_id.value: dict(item.parameters) for item in plan.strategies},
+                    wordlist_lines=(
+                        file_line_count(os.environ["SAGE_WORDLIST_PATH"])
+                        if os.environ.get("SAGE_WORDLIST_PATH") else 0
+                    ),
+                )
+                row["native_units"] = ",".join(
+                    f"{strategy}:{keyspace}" for strategy, keyspace in native_units.items()
+                )
 
                 if args.space_only:
                     row["reason"] = (
@@ -290,6 +372,7 @@ def main() -> int:
                 row["tested"] = result["total_tested"]
                 row["stop_reason"] = research.get("stop_reason") or ""
                 row["run_status"] = result["status"]
+                row["run_message"] = (result.get("message") or "")[:200]
                 row["recovered"] = result["total_recovered"] > 0
                 if row["recovered"]:
                     row["hit_strategy"] = ",".join(
@@ -298,10 +381,17 @@ def main() -> int:
                     )
                     row["reason"] = "命中"
                 else:
-                    row["reason"] = (
-                        f"候选空间已覆盖（{','.join(hits)}）但未命中：预算/调度问题"
-                        if hits else "候选空间未覆盖：生成器能力不足"
-                    )
+                    if hits:
+                        row["reason"] = (
+                            f"候选空间已覆盖（{','.join(hits)}）但未命中：预算/调度问题"
+                        )
+                    elif native_units:
+                        row["reason"] = (
+                            "Python 候选空间未覆盖；原生单元已实测仍未命中"
+                            f"（{row['native_units']}）"
+                        )
+                    else:
+                        row["reason"] = "候选空间未覆盖：生成器能力不足"
             except Exception as exc:  # 单个案例失败不影响整体
                 row["error"] = f"{type(exc).__name__}: {exc}"
                 row["reason"] = "执行异常"
@@ -334,7 +424,9 @@ def main() -> int:
         "",
         f"- 命中：**{hit}/{total}**（{hit / total * 100:.1f}%）",
         f"- 配置：时间预算 {TIME_BUDGET}s、候选预算 {CANDIDATE_BUDGET}、"
-        f"命中即停、词表 {word_count} 条、规则 best66、掩码 `{MASK_LADDER}`、混合 `{HYBRID_MASKS}`",
+        f"命中即停、词表 {word_count} 条、"
+        f"规则 {'+'.join(Path(r).stem for r in RULE_FILES)}、"
+        f"掩码 `{MASK_LADDER}`、混合 `{HYBRID_MASKS}`",
         "",
         "## 按类别",
         "",
@@ -350,12 +442,13 @@ def main() -> int:
         reason_text = "；".join(f"{k}×{v}" for k, v in reasons.items()) or "—"
         lines.append(f"| {category} | {ok}/{len(items)} | {ok / len(items) * 100:.0f}% | {reason_text} |")
 
-    lines += ["", "## 未命中明细", "", "| ID | 类别 | 口令 | 候选空间命中单元 | 原因 |", "| --- | --- | --- | --- | --- |"]
+    lines += ["", "## 未命中明细", "", "| ID | 类别 | 口令 | Python 候选空间命中单元 | 原生单元键空间 | 原因 |", "| --- | --- | --- | --- | --- | --- |"]
     for row in rows:
         if not row["recovered"]:
             lines.append(
                 f"| {row['id']} | {row['category']} | `{row['password']}` | "
-                f"{row['space_hit_arms'] or '—'} | {row['reason']} |"
+                f"{row['space_hit_arms'] or '—'} | {row.get('native_units') or '—'} | "
+                f"{row['reason']} |"
             )
     lines += ["", "## 命中明细（按策略）", "", "| ID | 类别 | 口令 | 命中策略 | 测试候选 | 耗时(s) |", "| --- | --- | --- | --- | --- | --- |"]
     for row in rows:
@@ -364,6 +457,16 @@ def main() -> int:
                 f"| {row['id']} | {row['category']} | `{row['password']}` | "
                 f"{row['hit_strategy']} | {row['tested']} | {row['seconds']} |"
             )
+    by_strategy: dict[str, int] = {}
+    for row in rows:
+        if row["recovered"]:
+            for name in row["hit_strategy"].split(","):
+                if name:
+                    by_strategy[name] = by_strategy.get(name, 0) + 1
+    lines += ["", "## 策略命中分布", ""]
+    lines += [
+        f"- {name}：{count} 次" for name, count in sorted(by_strategy.items())
+    ] or ["- （无命中）"]
     md_path = out_dir / f"benchmark-100-{stamp}.md"
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 

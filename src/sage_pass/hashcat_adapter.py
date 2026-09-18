@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .enums import TaskStatus
 from .errors import AppError
+from .keyspace import file_line_count, native_keyspace
 
 
 HASHCAT_MODES = {
@@ -93,6 +94,21 @@ class HashcatJob:
     inline_rules: tuple[str, ...] = ()
     masks: tuple[str, ...] = ()
     custom_charsets: tuple[str, ...] = ()
+    # 词表条数上限（hashcat `-l/--limit`）：把原生攻击的键空间压到调度分配的候选
+    # 预算内，保证"实测候选数 ≤ 分配预算"。（`-l` 限制的是词表条数，规则/掩码会按
+    # 倍数放大，因此调用方需按 keyspace.native_keyspace 计算安全条数。）
+    wordlist_limit: int | None = None
+    # 低内存 / 低显存适配：-O 优化内核、-n/-u/-T 限制内核资源、-D 选择设备类型。
+    # hashcat 要求 -n/-u 必须与 -O 同时使用，因此设置内核参数时自动开启优化内核。
+    optimized: bool = False
+    kernel_accel: int | None = None
+    kernel_loops: int | None = None
+    kernel_threads: int | None = None
+    device_types: int | None = None
+
+    @property
+    def is_low_memory(self) -> bool:
+        return bool(self.optimized or self.kernel_accel or self.kernel_loops)
 
     @property
     def is_native(self) -> bool:
@@ -160,8 +176,26 @@ class HashcatHandle:
                 "EXECUTION_FAILED", "Hashcat 掩码攻击缺少 mask", status_code=422, details={}
             )
         self.job = job
+        # 候选基准量：Python 候选单元就是候选条数；原生攻击（掩码/词表×规则/
+        # 词表×掩码）必须用键空间，否则掩码作业会拿"掩码个数"当候选数，把实测
+        # 条数夹到 1～2 条（曾导致 S6 只记 2 条候选的记账错误）。
+        self.keyspace = native_keyspace(
+            attack_mode=job.attack_mode,
+            wordlist_lines=(
+                file_line_count(external_wordlist)
+                if external_wordlist is not None
+                else 0
+            ),
+            candidate_count=len(candidates),
+            masks=masks,
+            custom_charsets=custom_charsets,
+            rule_files=rule_files,
+            inline_rules=inline_rules,
+        )
         self.candidate_count = (
-            int(job.candidate_estimate or job.candidate_budget or 1)
+            self.keyspace
+            if self.keyspace is not None
+            else int(job.candidate_estimate or job.candidate_budget or 1)
             if external_wordlist is not None
             else len(candidates) if candidates else len(masks)
         )
@@ -231,6 +265,19 @@ class HashcatHandle:
         self._stdout_file = self._stdout_path.open("ab" if resuming else "wb")
         self._stderr_file = self._stderr_path.open("ab" if resuming else "wb")
 
+        low_memory_args: list[str] = []
+        if job.optimized or job.kernel_accel is not None or job.kernel_loops is not None:
+            # -O 优化内核（最长 31 字符）；-n/-u 在 hashcat 7 需要与 -O 同时出现。
+            low_memory_args.append("-O")
+        if job.kernel_accel is not None:
+            low_memory_args.extend(["-n", str(job.kernel_accel)])
+        if job.kernel_loops is not None:
+            low_memory_args.extend(["-u", str(job.kernel_loops)])
+        if job.kernel_threads is not None:
+            low_memory_args.extend(["-T", str(job.kernel_threads)])
+        if job.device_types is not None:
+            low_memory_args.extend(["-D", str(job.device_types)])
+
         common = [
             *command,
             "--session",
@@ -239,6 +286,7 @@ class HashcatHandle:
             str(self._restore_path),
         ]
         args = [*common, "--restore"] if resuming else [
+                *low_memory_args,
                 *common,
                 "--hash-type",
                 str(job.hash_mode),
@@ -259,6 +307,7 @@ class HashcatHandle:
                 "\t",
                 *_custom_charset_args(custom_charsets),
                 *_rule_args(rule_files, self._inline_rule_path if inline_rules else None),
+                *_wordlist_limit_args(job.wordlist_limit),
                 str(self._target_path),
                 *_attack_position_args(
                     job.attack_mode,
@@ -376,8 +425,9 @@ class HashcatHandle:
         if tested is None:
             tested = self.candidate_count if exit_code == 1 else len(recovered)
         tested = max(tested, len(recovered))
-        if not getattr(self, "native", False):
-            tested = min(tested, self.candidate_count)
+        if self.keyspace is not None:
+            # 多个 salt 时原始进度可能重复计数，按键空间（= 该批次真实候选量）夹取。
+            tested = min(tested, self.keyspace)
 
         if self._stop_reason == "cancelled":
             status = TaskStatus.CANCELLED
@@ -390,7 +440,7 @@ class HashcatHandle:
             message = "Hashcat 已恢复目标" if recovered else "候选集已执行完毕，未恢复目标"
         else:
             status = TaskStatus.FAILED
-            message = "Hashcat 执行失败"
+            message = f"Hashcat 执行失败（exit={exit_code}）：{_failure_reason(stderr, stdout)}"
 
         self._result = HashcatResult(
             status=status,
@@ -634,6 +684,13 @@ def _validate_attack_contract(
             status_code=422,
             details={"attack_mode": job.attack_mode},
         )
+    if job.wordlist_limit is not None and (job.attack_mode == 3 or not job.is_native):
+        raise AppError(
+            "EXECUTION_FAILED",
+            "Hashcat 词表条数上限（-l）仅适用于带外部词表的攻击",
+            status_code=422,
+            details={"attack_mode": job.attack_mode, "is_native": job.is_native},
+        )
 
 
 def _custom_charset_args(custom_charsets: Sequence[str]) -> list[str]:
@@ -653,6 +710,15 @@ def _rule_args(
     if inline_rule_path is not None:
         args.extend(("-r", str(inline_rule_path)))
     return args
+
+
+def _wordlist_limit_args(wordlist_limit: int | None) -> list[str]:
+    """词表条数上限：把原生攻击的实测候选数压到分配预算内。"""
+    if wordlist_limit is None:
+        return []
+    if wordlist_limit <= 0:
+        raise ValueError("wordlist_limit must be positive")
+    return ["-l", str(wordlist_limit)]
 
 
 def _attack_position_args(
@@ -732,6 +798,21 @@ def _read_log(path: Path) -> str:
     if not path.exists():
         return ""
     return path.read_text(encoding="utf-8", errors="replace")[-64_000:]
+
+
+def _failure_reason(stderr: str, stdout: str) -> str:
+    """提取 hashcat 失败的第一条有意义信息，便于直接展示给使用者。"""
+    noise = ("nvml", "please be patient", "initializing", "initialized")
+    for text in (stderr, stdout):
+        for line in text.splitlines():
+            stripped = line.strip().strip("*").strip()
+            if not stripped or "|" == stripped:
+                continue
+            lowered = stripped.lower()
+            if any(marker in lowered for marker in noise):
+                continue
+            return stripped[:300]
+    return "未提供错误详情"
 
 
 def _parse_outfile(path: Path) -> tuple[RecoveredCredential, ...]:

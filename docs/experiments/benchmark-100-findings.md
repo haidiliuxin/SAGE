@@ -91,6 +91,118 @@ hashcat 为 GPU 内核映射缓冲区需要可分配的主机内存，因此**�
 | 6 | 中文口令支持：中文词表 + 中文相关规则/掩码策略 | cn+mixed 类目前 0/10 | 中文场景 |
 | 7 | 待模型数据：PCFG grammar / OMEN(Markov) 训练模型 | S3 目前仅 pcfg_lite 约 800 条 | 统计型口令 |
 
+## 三点五、优化实施记录（2026-09-19，第二轮）
+
+| # | 状态 | 落地方式 |
+| --- | --- | --- |
+| 1 | ✅ | S1 的原生词表作业带 `-r`：`hashcat -a 0 dict.txt -r best66.rule`（`RulePlanner` 把 `hashcat_rule_files` 写进 S1 参数，执行层直接交给 hashcat 读盘）。S2 回退为"Python 规则变形候选"，不再叠加 `-r`（避免规则二次作用于已变形的候选）。 |
+| 2 | ✅ | `SAGE_HASHCAT_OPTIMIZED`/`KERNEL_*`/`DEVICE_TYPES` + 内存失败自动降级重试。 |
+| 3 | ✅ | `_failure_reason()` 把 stderr 尾部与退出码写进运行消息。 |
+| 4 | ✅ | 混合掩码加入 `?d?d?d?d`（词 + 年份）；掩码阶梯保留 `?d?d?d?d`/`?l?l?l?l`；单靠自己就超出任务候选预算的掩码会被计划层忽略。 |
+| 5 | ✅ | `context.py` 增加个人信息组合（`用户名_年份`、`昵称#年份`、`生日/手机尾号` 组合等）。 |
+| 6 | ✅ | 中文词表 `data/wordlists/zh-base.txt`（99 条）作为 `SAGE_SEED_WORDLISTS`，并扩展内置基线口令。 |
+| 7 | ⏳ | OMEN/Markov 模型已训练并接入 S3（`models/markov-demo` + `scripts/train_markov.py`）；**PCFG grammar（pcfg_full）仍缺语料与训练数据**。 |
+
+### 3.2 第二轮发现：原生攻击的候选记账（调度不变量）
+
+真实评测暴露了一个**运行中途整体失败**的问题：
+
+```
+内部错误：tested must be between zero and candidate_count（strategy=S7 tested=8100 candidate_count=2000）
+```
+
+根因：调度层按"实际测试的候选数"记账，并要求 `tested ≤ candidate_count ≤ 该单元分配预算`；
+但 S6/S7 的候选由 hashcat 自己枚举，键空间（词表 81 条 × `?d?d` = 8100）远大于计划按权重
+分给该单元的 Python 候选数（2000）。原实现用 `min(tested, budget)` 夹取记账，反而直接破坏了
+`tested ≤ candidate_count`，于是整个运行被一个记账问题中断。
+
+修复（三层，各司其职）：
+
+1. `src/sage_pass/keyspace.py`：统一的键空间模型——`-a 3` 为掩码乘积、`-a 0` 为词表条数 ×
+   规则条数、`-a 6/7` 为词表条数 × 掩码键空间；含自定义字符集与 `?1..?4` 解析，无法估算时返回
+   `None`（保守）。
+2. 计划层 `_fit_native_units()`：**优先满足原生单元**（键空间是精确可知的），把 S1/S6/S7 的预算
+   设为各自键空间，剩余预算再按权重分给 Python 生成单元；键空间超过总候选预算的掩码直接忽略
+   （永远跑不起来），仍装不下时按预算裁剪掩码阶梯并在计划警告里说明。
+3. 执行层 `_fit_job_to_budget()`：启动前兜底——掩码单元裁剪掩码阶梯，词表单元用 hashcat
+   `-l/--limit` 截断词表条数（`-l` 限制的是词表条数，规则/掩码按倍数放大，因此按倍数反算），
+   确实装不下时**优雅跳过该单元**而不是中断整个运行；记账改为 `max(候选数, 实测数)`。
+
+验证：`tests/test_native_keyspace_budget.py`（键空间解析、计划层预算分配与裁剪、执行层 `-l` 截断
+与越界跳过）；全量 `pytest` 通过。
+
+### 3.3 规则集实验（决定 S1 用哪套 `-r`）
+
+语料：本评测的 100 条口令；词表：`data/benchmark/base-words.txt`（81 条）；
+命令：`hashcat -m 0 -a 0 <100 条 md5> base-words.txt -r …`（离线直接跑，脚本见
+`scripts/rules_probe.py` 的离线版本，本机 RTX 4060 Laptop）。
+
+| 规则集 | 命中 | 规则数/词（hashcat 报的 `Rules:`） | 键空间（81 词 ×） |
+| --- | --- | --- | --- |
+| best66 | 16/100 | 66 | 6 318 |
+| best66 + leetspeak | 16/100 | 66 × 25 = 1 650 | 8 343 |
+| best66 + combinator | 26/100 | 66 × 63 = 4 158 | 11 421 |
+| best66 + combinator + stacking58 | 38/100 | 66 × 63 × 72 = 299 376 | 17 253 |
+| best66 + d3ad0ne | 51/100 | 66 × 34 111 = 2 251 326 | 182 357 406 |
+| **best66 + dive** | **55/100** | 66 × 98 670 = 6 512 220 | **527 489 820** |
+| dive（单独） | 40/100 | 98 670 | 7 992 270 |
+| best66 ⊕ dive（**合并成一个文件** = 并集） | 40/100 | 98 736 | 7 997 616 |
+| best66 + d3ad0ne + dive / +leetspeak / +rockyou-30000 | 失败 | — | — |
+
+**关键发现：hashcat 的多个 `-r` 是规则链（乘积），不是并集。**
+
+- `-r a -r b` 会把 b 的规则**接在** a 的每条结果后面继续变换，规则数相乘（实测
+  `-r best66.rule -r dive.rule` 打印 `Rules: 6512220`）；把两份规则合并成一个文件才是并集
+  （`Rules: 98736`）；
+- 规则链才覆盖得住"词 + 大小写 + leet + 符号 + 数字"的叠加变形：并集只到 40/100，
+  链式到 55/100（多出 `C0ffee@7`、`Fl0wer!7`、`Qwerty2019!`、`zhangsan0305` 等）；
+- 代价是键空间爆炸（5.27 亿键 ≈ 21 秒纯 GPU 时间）与主机内存占用：三份以上大规则文件在本机
+  会失败（`Not enough allocatable memory (RAM) for this ruleset` /
+  `Unsupported number of rules used in rule chaining`），因此 1～2 份为宜；
+- 本评测最终配置取 **best66 × d3ad0ne**（51/100，1.82 亿键 ≈ 9 秒，可在时间预算内跑完），
+  整轮时间预算提到 60 秒让 S1 的份额（12 秒）够用。
+
+其他结论：
+
+1. 掩码（S6）对本语料 0 命中——语料全是"词根 + 变形"；掩码只在混合攻击（S7）里有价值：
+   `词表 × ?d?d?d?d` 单独就有 16/100；
+2. 单批次候选粒度默认 1000 时，每次 hashcat 启动（约 3 秒）只测试 1000 条候选：把
+   `SAGE_DECISION_BATCH_SIZE`/`SAGE_HASHCAT_STREAM_BATCH_SIZE` 提到 100000 后，
+   "候选空间已覆盖但未命中（预算/调度问题）"的案例（如 `Xiaoming#1998`）被 S4 命中。
+
+### 3.4 100 条真实评测结果（三轮对照）
+
+| 轮次 | 配置 | 命中 | 归档 |
+| --- | --- | --- | --- |
+| 优化前（仅候选空间诊断） | pcfg_lite + 20 条内置基线，掩码/混合默认值 | 10～22/100（Python 侧覆盖） | `benchmark-100-20260919-0042.*` |
+| 第 2 轮 | 修复记账 + S1 带 `-r best66` + 混合掩码加 `?d?d?d?d` | **47/100** | — |
+| 第 3 轮 | 批大小 100000 + 规则链 `best66 × d3ad0ne` + 时间预算 60s | **65/100** | `benchmark-100-20260919-0316.*` |
+
+第 3 轮分类结果（命中 65/100）：
+
+| 类别 | 命中 | 类别 | 命中 |
+| --- | --- | --- | --- |
+| dict+num | 10/10 | keyboard | 7/10 |
+| pinyin+num | 10/10 | phrase | 7/10 |
+| pii（个人信息） | 10/10 | cn+mixed | 6/10 |
+| reuse（旧口令复用） | 9/10 | dict+symbol | 5/10 |
+| | | leet | 1/10 |
+| | | hard（高熵对照） | 0/10 ✅ 预期不可达 |
+
+命中来源：S1（词表 × 规则链）51 条、S4（个人信息组合）10 条、S5/S2/S3/S7 各 1～2 条。
+`hard(对照)` 10 条全部未命中，说明评测本身没有"作弊"。
+
+### 3.5 下一轮优化清单（按第 3 轮未命中证据）
+
+| # | 优化项 | 证据 | 预期收益 |
+| --- | --- | --- | --- |
+| 1 | **leet 叠加规则**：自建一份"替换 + 大小写 + 数字/符号后缀"的小规则文件（几百条），与 best66 做规则链 | `leet` 仅 1/10：`H@ck3r2020`、`D@rkN1ght99`、`Bl@ckW1d0w`、`S3cur1ty2024` 等 9 条未命中；而 `best66 × dive` 能覆盖其中 4 条，代价是 5.27 亿键 / 21 秒 | leet + dict+symbol 合计 +6～8 条 |
+| 2 | **历史口令结构变换（S4/S5）**：把历史口令中的年份/数字替换为上下文年份、符号后缀互换（`Sunshine2019!` → `Sunshine2023#`） | `reuse` 9/10，唯一未命中 `Sunshine2023#` 就是"换年份 + 换符号" | reuse +1，pii 类更稳 |
+| 3 | **词表补全键盘序列**：`zxcvbnm`、`zxcasdqwe`、`qweasdzxc`、`poiuytrewq` 等完整序列 | `keyboard` 3 条未命中（`zxcvbnm!`、`zxcasdqwe`、`qweasdzxc2`）都只差"完整序列 + 后缀" | keyboard +3 |
+| 4 | **组合攻击（`-a 1`：词表 × 词表）**：短语类（`correct-horse`、`ilovechina2020`、`welcometothejungle`）需要两词/多词拼接 | `phrase` 3 条未命中全部是多词拼接 | phrase +3 |
+| 5 | **结构模板扩展**：`123456abc`、`a1b2c3d4`、`xiaoming_2001`、`password!@#2024` | `cn+mixed` 4 条未命中都是"字母数字交替 / 符号串"结构 | cn+mixed +2～3 |
+| 6 | PCFG grammar（`pcfg_full`）语料与训练数据 | 优化清单第 7 项未完成的一半 | 统计型口令 |
+
 ## 五、复现方式
 
 ```powershell

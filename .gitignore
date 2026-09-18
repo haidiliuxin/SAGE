@@ -13,4 +13,6 @@ data/uploads/*
 data/**/*.sqlite3
 data/**/*.db
 data/**/*.jsonl
+# 评测/调试运行产物（可复现，不入库；词表与语料本身要入库）
+data/benchmark/
 frontend/tsconfig.app.tsbuildinfo

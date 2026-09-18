@@ -291,7 +291,10 @@ class BanditScheduler:
         if candidate_count <= 0:
             raise ValueError("candidate_count must be positive")
         if tested < 0 or tested > candidate_count:
-            raise ValueError("tested must be between zero and candidate_count")
+            raise ValueError(
+                f"tested must be between zero and candidate_count"
+                f"（strategy={strategy_id} tested={tested} candidate_count={candidate_count}）"
+            )
         if recovered < 0 or recovered > tested:
             raise ValueError("recovered must be between zero and tested")
         if duration < 0:

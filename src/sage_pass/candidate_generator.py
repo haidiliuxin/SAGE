@@ -35,6 +35,12 @@ DEFAULT_BASELINE_CANDIDATES = (
     "abc123", "111111", "123123", "admin", "letmein", "welcome",
     "monkey", "dragon", "football", "iloveyou", "password1",
     "qwerty123", "000000", "1q2w3e4r",
+    # 中文场景常见口令（拼音/数字/中文词），提升中文目标的起点覆盖率。
+    "5201314", "1314520", "woaini1314", "woaini520", "woaini",
+    "a123456", "123456a", "123qwe", "qwe123", "qq123456",
+    "wang123", "zhang123", "liu123", "chen123", "asdasd",
+    "aaaaaa", "321321", "abcd1234", "p@ssw0rd", "woshishui",
+    "密码123", "我爱你", "生日快乐", "woaini1314520", "1234567890",
 )
 DEFAULT_NUMBER_SUFFIXES = ("1", "12", "123", "1234", "520", "666", "888")
 DEFAULT_YEAR_SUFFIXES = (

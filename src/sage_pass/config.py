@@ -39,6 +39,24 @@ def _parse_scheduler_type(raw: str) -> SchedulerType:
         ) from exc
 
 
+def _parse_path_list(raw: str, variable: str) -> tuple[Path, ...]:
+    """逗号分隔的路径列表（规则文件、种子词表）。"""
+    items = tuple(_as_path(item.strip()) for item in raw.split(",") if item.strip())
+    return items
+
+
+def _parse_optional_int(raw: str | None, variable: str) -> int | None:
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{variable}={raw!r} 不是整数") from exc
+    if value <= 0:
+        raise ValueError(f"{variable} 必须大于 0")
+    return value
+
+
 def _parse_mask_list(raw: str, variable: str) -> tuple[str, ...]:
     """逗号分隔的掩码列表（如 ?d?d?d?d,?l?l?l?l）。"""
     items = tuple(item.strip() for item in raw.split(",") if item.strip())
@@ -59,6 +77,16 @@ def _parse_batch_size(raw: str, variable: str = "SAGE_DECISION_BATCH_SIZE") -> i
     if value > 100_000:
         raise ValueError(f"{variable} 不能超过 100000")
     return value
+
+
+# 掩码阶梯与混合掩码的默认值（与 Settings 字段默认一致）。
+_DEFAULT_MASK_LADDER = (
+    "?d?d?d?d",
+    "?l?l?l?l?l?l",
+    "?l?l?l?l?d?d",
+    "?u?l?l?l?l?d?d",
+)
+_DEFAULT_HYBRID_MASKS = ("?d", "?d?d", "?d?d?d?d", "!", "@", "!?d")
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,10 +126,28 @@ class Settings:
     # 流式调度每次决策的候选上限：默认与调度粒度一致，保证 Bandit 能在单元内部
     # 重新分配预算；吞吐优先时可调大（如 100000）以摊薄 hashcat 进程启动开销。
     hashcat_stream_batch_size: int = 1_000
-    # 原生攻击配置：规则文件（-r）、掩码阶梯（-a 3）、混合掩码（-a 6）。
+    # 原生攻击配置。
+    # 规则文件（-r）：用于 S1 的原生"词表 × 规则"攻击（配置了词表时生效）。
     rules_path: Path | None = None
-    mask_ladder: tuple[str, ...] = ()
-    hybrid_masks: tuple[str, ...] = ()
+    # 词表 × 规则：默认复用 rules_path；可用 SAGE_WORDLIST_RULES 指定多个规则文件。
+    wordlist_rule_paths: tuple[Path, ...] = ()
+    # 掩码阶梯（-a 3）：默认覆盖"4 位数字/年份""6 位小写""小写+两位数字""首字母大写+小写+两位数字"。
+    mask_ladder: tuple[str, ...] = (
+        "?d?d?d?d",
+        "?l?l?l?l?l?l",
+        "?l?l?l?l?d?d",
+        "?u?l?l?l?l?d?d",
+    )
+    # 混合掩码（-a 6，词表 + 掩码）：覆盖 1 位数字、2 位数字、4 位年份、单符号、符号+数字。
+    hybrid_masks: tuple[str, ...] = ("?d", "?d?d", "?d?d?d?d", "!", "@", "!?d")
+    # 额外种子词表（例如中文常见口令词表）：内容作为 S1/S2/S3 的种子并进入 Python 候选。
+    seed_wordlists: tuple[Path, ...] = ()
+    # 低内存 / 低显存适配（8GB 显存或主机内存紧张时建议开启）。
+    hashcat_optimized: bool = False
+    hashcat_kernel_accel: int | None = None
+    hashcat_kernel_loops: int | None = None
+    hashcat_kernel_threads: int | None = None
+    hashcat_device_types: int | None = None
     wordlist_path: Path | None = None
     stop_on_hit: bool = False
 
@@ -210,11 +256,40 @@ class Settings:
                 if (value := os.getenv("SAGE_RULES_PATH"))
                 else None
             ),
-            mask_ladder=_parse_mask_list(
-                os.getenv("SAGE_MASK_LADDER", ""), "SAGE_MASK_LADDER"
+            mask_ladder=(
+                _parse_mask_list(
+                    os.getenv("SAGE_MASK_LADDER", ""), "SAGE_MASK_LADDER"
+                )
+                or _DEFAULT_MASK_LADDER
             ),
-            hybrid_masks=_parse_mask_list(
-                os.getenv("SAGE_HYBRID_MASKS", ""), "SAGE_HYBRID_MASKS"
+            hybrid_masks=(
+                _parse_mask_list(
+                    os.getenv("SAGE_HYBRID_MASKS", ""), "SAGE_HYBRID_MASKS"
+                )
+                or _DEFAULT_HYBRID_MASKS
+            ),
+            wordlist_rule_paths=_parse_path_list(
+                os.getenv("SAGE_WORDLIST_RULES", ""), "SAGE_WORDLIST_RULES"
+            ),
+            seed_wordlists=_parse_path_list(
+                os.getenv("SAGE_SEED_WORDLISTS", ""), "SAGE_SEED_WORDLISTS"
+            ),
+            hashcat_optimized=os.getenv("SAGE_HASHCAT_OPTIMIZED", "false")
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"},
+            hashcat_kernel_accel=_parse_optional_int(
+                os.getenv("SAGE_HASHCAT_KERNEL_ACCEL"), "SAGE_HASHCAT_KERNEL_ACCEL"
+            ),
+            hashcat_kernel_loops=_parse_optional_int(
+                os.getenv("SAGE_HASHCAT_KERNEL_LOOPS"), "SAGE_HASHCAT_KERNEL_LOOPS"
+            ),
+            hashcat_kernel_threads=_parse_optional_int(
+                os.getenv("SAGE_HASHCAT_KERNEL_THREADS"),
+                "SAGE_HASHCAT_KERNEL_THREADS",
+            ),
+            hashcat_device_types=_parse_optional_int(
+                os.getenv("SAGE_HASHCAT_DEVICE_TYPES"), "SAGE_HASHCAT_DEVICE_TYPES"
             ),
             stop_on_hit=os.getenv("SAGE_STOP_ON_HIT", "false")
             .strip()

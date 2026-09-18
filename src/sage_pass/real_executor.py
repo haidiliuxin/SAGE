@@ -12,6 +12,7 @@ from typing import Any, Iterator
 from sqlalchemy.orm import Session
 
 from .candidate_generator import (
+    DEFAULT_BASELINE_CANDIDATES,
     CandidateBatch,
     CandidateGenerator,
     CandidatePlanStream,
@@ -42,6 +43,13 @@ from .hashcat_adapter import (
     resolve_hashcat_mode,
 )
 from .interfaces import BatchOutcome, DecisionEvent
+from .keyspace import (
+    file_line_count,
+    mask_keyspace,
+    masks_keyspace,
+    rule_chain_count,
+    select_masks_within,
+)
 from .decision.rewards import RewardWeights, RewardContext
 from .decision.research_log import ResearchRecorder, SqliteResearchLog
 from .decision.costs import UCBConfig
@@ -185,7 +193,11 @@ class RealExecutor:
             raise ValueError(
                 "candidate_generator 与 generator_registry 不能同时提供"
             )
+        seed_words = _load_seed_words(settings.seed_wordlists)
         self.candidate_generator = candidate_generator or CandidateGenerator(
+            baseline_candidates=tuple(
+                dict.fromkeys((*DEFAULT_BASELINE_CANDIDATES, *seed_words))
+            ),
             registry=generator_registry,
             pcfg_variant=settings.pcfg_variant,
             pcfg_ruleset_path=(
@@ -203,6 +215,20 @@ class RealExecutor:
             s4_generator_id=settings.s4_generator_id,
         )
         self.control = control
+        self._low_memory_kwargs = {
+            "optimized": settings.hashcat_optimized,
+            "kernel_accel": settings.hashcat_kernel_accel,
+            "kernel_loops": settings.hashcat_kernel_loops,
+            "kernel_threads": settings.hashcat_kernel_threads,
+            "device_types": settings.hashcat_device_types,
+        }
+        self._memory_fallback_kwargs = {
+            "optimized": True,
+            "kernel_accel": 1,
+            "kernel_loops": 1,
+            "kernel_threads": 1,
+            "device_types": settings.hashcat_device_types,
+        }
         self.feedback_config = FeedbackConfig(
             minimum_observations=settings.feedback_minimum_observations,
             minimum_tasks=settings.feedback_minimum_tasks,
@@ -923,21 +949,36 @@ class RealExecutor:
                 state.current_strategy_id = item.strategy_id
             try:
                 if item.native_wordlist_path is not None:
-                    handle = self.hashcat.start(
-                        HashcatJob(
-                            run_id=(
-                                f"{state.run_id}-{item.strategy_id}-"
-                                f"{item.scheduled_batches}"
-                            ),
-                            target_hashes=state.targets,
-                            hash_mode=state.hash_mode,
-                            timeout_seconds=decision.time_limit,
-                            candidate_budget=0,
-                            attack_mode=0,
-                            wordlist_path=item.native_wordlist_path,
-                            candidate_estimate=item.candidate_budget,
-                        )
+                    # S1：原生词表攻击；带规则文件时即 hashcat 最经典的"词表 × 规则"
+                    # （-a 0 dict.txt -r best66.rule），键空间 = 词表条数 × 规则条数。
+                    native_job = HashcatJob(
+                        run_id=(
+                            f"{state.run_id}-{item.strategy_id}-"
+                            f"{item.scheduled_batches}"
+                        ),
+                        target_hashes=state.targets,
+                        hash_mode=state.hash_mode,
+                        timeout_seconds=decision.time_limit,
+                        candidate_budget=0,
+                        attack_mode=0,
+                        wordlist_path=item.native_wordlist_path,
+                        rule_files=_string_tuple(
+                            item.parameters.get("hashcat_rule_files")
+                        ),
+                        candidate_estimate=item.candidate_budget,
+                        session_dir=self._batch_session_dir(state, item),
+                        **self._low_memory_kwargs,
                     )
+                    native_job, skip_reason = _fit_job_to_budget(
+                        native_job, allocation=decision.candidate_limit
+                    )
+                    if native_job is None:
+                        item.native_pending = False
+                        item.status = TaskStatus.COMPLETED.value
+                        item.finished_at = now_iso()
+                        item.message = skip_reason
+                        continue
+                    handle = self.hashcat.start(native_job)
                     item.native_pending = False
                 elif _parameter_native_arm(item):
                     native_job = _hashcat_job_for_strategy(
@@ -951,50 +992,75 @@ class RealExecutor:
                         timeout_seconds=decision.time_limit,
                         candidate_budget=item.candidate_budget,
                         parameters=item.parameters,
-                        session_dir=None,
+                        session_dir=self._batch_session_dir(state, item),
                     )
                     wordlist = state.native_wordlist
                     if native_job.attack_mode in {0, 6, 7}:
-                        if wordlist is None:
-                            # 混合/词表攻击需要字典：没有字典就让出该单元，不拖垮整个运行。
+                        if wordlist is None and native_job.attack_mode in {6, 7}:
+                            # 混合攻击必须有字典：没有就让出该单元，不拖垮整个运行。
                             item.native_pending = False
                             item.status = TaskStatus.COMPLETED.value
                             item.finished_at = now_iso()
                             item.message = "该原生攻击需要词表，本次未配置词表"
                             continue
-                        native_job = replace(
-                            native_job,
-                            wordlist_path=wordlist,
-                            candidate_budget=0,
-                            candidate_estimate=item.candidate_budget,
-                        )
+                        if wordlist is not None:
+                            # 词表 × 规则 / 词表 × 掩码：字典直接交给 hashcat 读盘，
+                            # 不再把 Python 候选送进去。规则只在词表模式下生效
+                            # （hashcat 的 -r 不支持掩码/混合模式）。
+                            rules = native_job.rule_files
+                            if native_job.attack_mode == 0 and not rules:
+                                rules = tuple(
+                                    str(path)
+                                    for path in self.settings.wordlist_rule_paths
+                                )
+                            native_job = replace(
+                                native_job,
+                                wordlist_path=wordlist,
+                                candidates=(),
+                                rule_files=(
+                                    rules if native_job.attack_mode == 0 else ()
+                                ),
+                                candidate_budget=0,
+                                candidate_estimate=item.candidate_budget,
+                            )
+                    native_job = replace(native_job, **self._low_memory_kwargs)
+                    native_job, skip_reason = _fit_job_to_budget(
+                        native_job, allocation=decision.candidate_limit
+                    )
+                    if native_job is None:
+                        item.native_pending = False
+                        item.status = TaskStatus.COMPLETED.value
+                        item.finished_at = now_iso()
+                        item.message = skip_reason
+                        continue
                     handle = self.hashcat.start(native_job)
                     item.native_pending = False
                 else:
-                    handle = self.hashcat.start(
-                        _hashcat_job_for_strategy(
-                            run_id=(
-                                f"{state.run_id}-{item.strategy_id}-"
-                                f"{item.scheduled_batches}"
-                            ),
-                            target_hashes=state.targets,
-                            hash_mode=state.hash_mode,
-                            candidates=candidates,
-                            timeout_seconds=decision.time_limit,
-                            candidate_budget=len(candidates),
-                            parameters=item.parameters,
-                            session_dir=(
-                                str(
-                                    self.settings.upload_dir.parent
-                                    / "hashcat-sessions"
-                                    / state.run_id
-                                    / f"{item.strategy_id}-{item.scheduled_batches}"
-                                )
-                                if state.candidate_stream is not None
-                                else None
-                            ),
-                        )
+                    candidate_job = _hashcat_job_for_strategy(
+                        run_id=(
+                            f"{state.run_id}-{item.strategy_id}-"
+                            f"{item.scheduled_batches}"
+                        ),
+                        target_hashes=state.targets,
+                        hash_mode=state.hash_mode,
+                        candidates=candidates,
+                        timeout_seconds=decision.time_limit,
+                        candidate_budget=len(candidates),
+                        parameters=item.parameters,
+                        low_memory_kwargs=self._low_memory_kwargs,
+                        session_dir=self._batch_session_dir(state, item),
                     )
+                    # 带 -r 规则的 Python 候选作业会把键空间放大（候选数 × 规则数），
+                    # 同样需要压回本批次的候选预算。
+                    candidate_job, skip_reason = _fit_job_to_budget(
+                        candidate_job, allocation=decision.candidate_limit
+                    )
+                    if candidate_job is None:
+                        item.status = TaskStatus.COMPLETED.value
+                        item.finished_at = now_iso()
+                        item.message = skip_reason
+                        continue
+                    handle = self.hashcat.start(candidate_job)
             except AppError as exc:
                 with self._lock:
                     state.current_strategy_id = None
@@ -1028,6 +1094,24 @@ class RealExecutor:
                 return
             try:
                 result = handle.wait()
+                if (
+                    result.status == TaskStatus.FAILED
+                    and _is_memory_failure(result)
+                    and not self._job_is_low_memory(item)
+                ):
+                    # 主机/显存不足：按 hashcat 的建议降级（-O -n1 -u1 -T1）重试一次。
+                    LOGGER.warning(
+                        "hashcat 内存不足，降级重试：run_id=%s strategy=%s",
+                        state.run_id,
+                        item.strategy_id,
+                    )
+                    with self._lock:
+                        state.current_strategy_id = item.strategy_id
+                    retry_handle = self.hashcat.start(
+                        self._build_retry_job(state, item, result, candidates, decision)
+                    )
+                    item.handle = retry_handle
+                    result = retry_handle.wait()
             except Exception as exc:  # pragma: no cover - wait 失败按执行失败处理
                 item.status = TaskStatus.FAILED.value
                 item.finished_at = now_iso()
@@ -1064,6 +1148,96 @@ class RealExecutor:
                 self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
                 return
 
+    def _batch_session_dir(self, state: _RunState, item: _StrategyState) -> str | None:
+        """批次工作目录：保留 hashcat 的 argv/stdout/session.json 以便复盘。
+
+        原生攻击（词表/掩码/混合）也必须留痕——否则"键空间与实测条数不一致"这类
+        问题只能靠临时抓日志，无法事后定位。
+        """
+        if state.candidate_stream is None:
+            return None
+        return str(
+            self.settings.upload_dir.parent
+            / "hashcat-sessions"
+            / state.run_id
+            / f"{item.strategy_id}-{item.scheduled_batches}"
+        )
+
+    def _job_is_low_memory(self, item: _StrategyState) -> bool:
+        return bool(self._low_memory_kwargs.get("optimized")) or bool(
+            self._low_memory_kwargs.get("kernel_accel")
+        )
+
+    def _build_retry_job(
+        self,
+        state: _RunState,
+        item: _StrategyState,
+        result: HashcatResult,
+        candidates: tuple[str, ...],
+        decision: Any,
+    ) -> HashcatJob:
+        """按降级参数重建作业（掩码/词表攻击从计划参数重建，其余用候选重建）。"""
+        run_id = f"{state.run_id}-{item.strategy_id}-{item.scheduled_batches}"
+        if item.native_wordlist_path is not None:
+            job = HashcatJob(
+                run_id=run_id,
+                target_hashes=state.targets,
+                hash_mode=state.hash_mode,
+                timeout_seconds=decision.time_limit,
+                candidate_budget=0,
+                attack_mode=0,
+                wordlist_path=item.native_wordlist_path,
+                rule_files=_string_tuple(item.parameters.get("hashcat_rule_files")),
+                candidate_estimate=item.candidate_budget,
+                **self._memory_fallback_kwargs,
+            )
+            fitted, _ = _fit_job_to_budget(job, allocation=decision.candidate_limit)
+            return fitted if fitted is not None else job
+        if _parameter_native_arm(item):
+            job = _hashcat_job_for_strategy(
+                run_id=run_id,
+                target_hashes=state.targets,
+                hash_mode=state.hash_mode,
+                candidates=(),
+                timeout_seconds=decision.time_limit,
+                candidate_budget=item.candidate_budget,
+                parameters=item.parameters,
+                session_dir=None,
+            )
+            if (
+                state.native_wordlist is not None
+                and job.attack_mode in {0, 6, 7}
+            ):
+                job = replace(
+                    job,
+                    wordlist_path=state.native_wordlist,
+                    candidates=(),
+                    rule_files=(
+                        job.rule_files
+                        if job.attack_mode == 0
+                        else ()
+                    ),
+                    candidate_budget=0,
+                    candidate_estimate=item.candidate_budget,
+                )
+            job = replace(job, **self._memory_fallback_kwargs)
+            fitted, _ = _fit_job_to_budget(job, allocation=decision.candidate_limit)
+            return fitted if fitted is not None else job
+        del result
+        job = HashcatJob(
+            run_id=run_id,
+            target_hashes=state.targets,
+            hash_mode=state.hash_mode,
+            candidates=candidates,
+            timeout_seconds=decision.time_limit,
+            candidate_budget=len(candidates) or 1,
+            attack_mode=0,
+            rule_files=_string_tuple(item.parameters.get("hashcat_rule_files")),
+            **self._memory_fallback_kwargs,
+        )
+        fitted, _ = _fit_job_to_budget(job, allocation=decision.candidate_limit)
+        return fitted if fitted is not None else job
+
     def _record_batch_result(
         self,
         scheduler: Any,
@@ -1082,9 +1256,11 @@ class RealExecutor:
             if credential.target in state.targets
         } - already_recovered
         item.time_cost += result.duration
-        # 原生攻击（词表/掩码）没有 Python 候选列表，用实测数量作为提交量，
-        # 保证调度器收到正的候选计数。
-        candidate_count = len(candidates) if candidates else max(result.tested, 1)
+        # 记账口径：提交量必须同时满足"实测候选数 ≤ 提交量 ≤ 该单元分配预算"。
+        # - Python 候选单元：提交量 = len(candidates)（带 -r 规则时已按预算裁剪）；
+        # - 原生单元（词表/掩码/混合）：没有 Python 候选列表，按 hashcat 实测值记账，
+        #   启动前已用 _fit_job_to_budget 把键空间压到分配预算内。
+        candidate_count = max(len(candidates), result.tested or 0, 1)
         outcome = BatchOutcome(
             run_id=state.run_id,
             arm_id=item.strategy_id,
@@ -1881,6 +2057,137 @@ def _strategy_result_time(item: _StrategyState) -> float:
     return item.time_cost
 
 
+MEMORY_FAILURE_MARKERS = (
+    "allocatable device memory",
+    "free host memory for mapping",
+    "out of memory",
+    "cl_out_of_host_memory",
+    "cl_out_of_resources",
+)
+
+
+def _is_memory_failure(result: HashcatResult) -> bool:
+    """识别 hashcat 因主机/显存不足而失败。"""
+    blob = f"{result.stderr}\n{result.stdout}".lower()
+    return any(marker in blob for marker in MEMORY_FAILURE_MARKERS)
+
+
+MAX_SEED_WORDS = 20_000
+
+
+def _load_seed_words(paths: tuple[Path, ...]) -> tuple[str, ...]:
+    """读取额外种子词表（例如中文常见口令），作为 S1/S2/S3 的种子进入 Python 候选。"""
+    words: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        candidate = Path(path).expanduser()
+        if not candidate.is_file():
+            LOGGER.warning("种子词表不存在，已跳过：%s", candidate)
+            continue
+        try:
+            lines = candidate.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as exc:  # pragma: no cover - 读取失败不影响运行
+            LOGGER.warning("种子词表读取失败（%s）：%s", candidate, exc)
+            continue
+        for line in lines:
+            value = line.strip()
+            if not value or len(value) > 1024 or value in seen:
+                continue
+            seen.add(value)
+            words.append(value)
+            if len(words) >= MAX_SEED_WORDS:
+                return tuple(words)
+    return tuple(words)
+
+
+def _fit_job_to_budget(
+    job: HashcatJob,
+    *,
+    allocation: int,
+) -> tuple[HashcatJob | None, str]:
+    """把作业的键空间压到本批次分配的候选预算内。
+
+    hashcat 原生攻击（掩码 / 词表 × 规则 / 词表 × 掩码）自己枚举候选，实测条数可能
+    远超计划里的候选数；调度层要求 `tested ≤ 分配预算`，因此启动前必须：
+    掩码单元裁剪掩码阶梯，词表单元用 `-l/--limit` 截断词表条数。
+    返回 (可执行作业, 跳过原因)；作业为 None 表示本批次放弃该单元。
+    """
+    budget = max(1, int(allocation))
+    masks = tuple(job.masks)
+    if job.attack_mode == 3:
+        keyspace = masks_keyspace(masks, custom_charsets=job.custom_charsets)
+        if keyspace is None:
+            return None, "无法估算掩码键空间，已跳过该单元"
+        if keyspace <= budget:
+            return job, ""
+        kept, _ = select_masks_within(
+            masks, base=1, budget=budget, custom_charsets=job.custom_charsets
+        )
+        if not kept:
+            return None, f"掩码键空间 {keyspace} 超出本批次候选预算 {budget}，已跳过该单元"
+        return replace(job, masks=tuple(kept)), ""
+
+    lines = (
+        file_line_count(job.wordlist_path)
+        if job.is_native
+        else len(job.candidates)
+    )
+    if lines <= 0:
+        return None, "词表为空，已跳过该单元"
+    if job.attack_mode in {6, 7}:
+        factor = masks_keyspace(masks, custom_charsets=job.custom_charsets)
+        if factor is None:
+            return None, "无法估算混合掩码键空间，已跳过该单元"
+        if lines * factor <= budget:
+            return job, ""
+        # 混合攻击：先按"单个词能不能装下"挑掩码（base=1），再用 -l 截断词表条数，
+        # 这样即使整本词表 × 掩码超预算，也能跑出预算内的前缀而不是直接放弃。
+        kept_masks, _ = select_masks_within(
+            masks,
+            base=1,
+            budget=budget,
+            custom_charsets=job.custom_charsets,
+        )
+        mask_factor = sum(
+            mask_keyspace(mask, custom_charsets=job.custom_charsets) or 0
+            for mask in kept_masks
+        )
+        if not kept_masks or mask_factor <= 0:
+            return None, f"混合掩码键空间 {factor} 超出本批次候选预算 {budget}，已跳过该单元"
+        # 词表 × 掩码：掩码裁剪后，再按剩余预算截断词表条数（-l 限制词表条数）。
+        wordlist_limit = budget // mask_factor
+        if wordlist_limit < 1:
+            return None, f"混合掩码键空间 {mask_factor} 超出本批次候选预算 {budget}，已跳过该单元"
+        if job.is_native:
+            return (
+                replace(
+                    job,
+                    masks=tuple(kept_masks),
+                    wordlist_limit=min(lines, wordlist_limit),
+                ),
+                "",
+            )
+        kept_candidates = job.candidates[:wordlist_limit]
+        if not kept_candidates:
+            return None, "混合掩码裁剪后无可用候选，已跳过该单元"
+        return replace(job, masks=tuple(kept_masks), candidates=kept_candidates), ""
+
+    rules = max(1, rule_chain_count(job.rule_files, inline_rules=job.inline_rules))
+    if lines * rules <= budget:
+        return job, ""
+    wordlist_limit = budget // rules
+    if wordlist_limit < 1:
+        return None, (
+            f"规则链放大倍数 {rules} 超出本批次候选预算 {budget}，已跳过该单元"
+        )
+    if job.is_native:
+        return replace(job, wordlist_limit=min(lines, wordlist_limit)), ""
+    kept_candidates = job.candidates[:wordlist_limit]
+    if not kept_candidates:
+        return None, "规则放大后无可用候选，已跳过该单元"
+    return replace(job, candidates=tuple(kept_candidates)), ""
+
+
 def _parameter_native_arm(item: "_StrategyState") -> bool:
     """计划参数声明为原生攻击（掩码/混合）的单元：候选由 hashcat 自己枚举。"""
     if item.parameters.get("hashcat_masks") or item.parameters.get("hashcat_hybrid_mask"):
@@ -1926,6 +2233,7 @@ def _hashcat_job_for_strategy(
     candidate_budget: int,
     parameters: dict[str, Any],
     session_dir: str | None,
+    low_memory_kwargs: dict[str, Any] | None = None,
 ) -> HashcatJob:
     """按策略参数构造 Hashcat 作业：规则文件/内联规则走 -r，掩码走 -a 3，
     混合攻击按 hashcat_hybrid_position 走 -a 6/7（掩码直接作为 hashcat 参数）。"""
@@ -1947,6 +2255,7 @@ def _hashcat_job_for_strategy(
         inline_rules=_string_tuple(parameters.get("hashcat_inline_rules")),
         masks=masks,
         custom_charsets=_string_tuple(parameters.get("hashcat_custom_charsets")),
+        **(low_memory_kwargs or {}),
     )
 
 

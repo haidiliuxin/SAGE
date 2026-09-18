@@ -20,6 +20,13 @@ from .enums import (
     TaskStatus,
     VerificationCost,
 )
+from .keyspace import (
+    file_line_count,
+    mask_keyspace,
+    masks_keyspace,
+    rule_chain_count,
+    select_masks_within,
+)
 from .policy import PolicyValidationError, PolicyValidator
 from .schemas import PRIR, StrategyItem, StrategyPlan
 from .transfer import KnowledgeSummary
@@ -444,12 +451,59 @@ class NativeAttackSettings:
     """
 
     rules_path: str | None = None
+    rule_paths: tuple[str, ...] = ()
     mask_ladder: tuple[str, ...] = ()
     hybrid_masks: tuple[str, ...] = ()
+    # 外部词表：原生词表攻击（S1 词表 × 规则、S7 词表 × 掩码）按它估算键空间。
+    wordlist_path: str | None = None
+
+    @property
+    def active_rule_paths(self) -> tuple[str, ...]:
+        """生效的规则文件：优先多路配置，回退单个 rules_path。"""
+        if self.rule_paths:
+            return self.rule_paths
+        return (self.rules_path,) if self.rules_path else ()
+
+    @property
+    def wordlist_lines(self) -> int:
+        if not self.wordlist_path:
+            return 0
+        return file_line_count(self.wordlist_path)
+
+    @property
+    def rule_count(self) -> int:
+        """规则链放大倍数（多个规则文件相乘，与 hashcat `-r a -r b` 一致）。"""
+        return rule_chain_count(self.active_rule_paths)
+
+    @property
+    def s1_keyspace(self) -> int | None:
+        """S1 原生词表（× 规则）一次批次测试的候选数。"""
+        lines = self.wordlist_lines
+        if lines <= 0:
+            return None
+        return lines * max(1, self.rule_count)
+
+    @property
+    def s6_keyspace(self) -> int | None:
+        """S6 掩码阶梯的总键空间。"""
+        return masks_keyspace(self.mask_ladder) if self.mask_ladder else None
+
+    @property
+    def s7_keyspace(self) -> int | None:
+        """S7 词表 × 掩码的总键空间。"""
+        if not self.hybrid_masks:
+            return None
+        lines = self.wordlist_lines
+        if lines <= 0:
+            return None
+        factor = masks_keyspace(self.hybrid_masks)
+        if factor is None:
+            return None
+        return lines * factor
 
     @property
     def enabled(self) -> bool:
-        return bool(self.rules_path or self.mask_ladder or self.hybrid_masks)
+        return bool(self.active_rule_paths or self.mask_ladder or self.hybrid_masks)
 
 
 class RulePlanner:
@@ -507,6 +561,12 @@ class RulePlanner:
                 candidate_allocations[StrategyId.S5],
                 max(1, knowledge_summary.suggested_s5_max_budget),
             )
+        # 原生攻击（S1 词表×规则 / S6 掩码 / S7 词表×掩码）的候选由 hashcat 自己枚举，
+        # 必须按键空间给它们分配预算，否则实测候选数会超出分配预算，破坏调度不变量。
+        native_masks, native_rules, native_warnings = _fit_native_units(
+            selected, candidate_allocations, candidate_limit, self.native_attacks,
+            weights,
+        )
         strategies = [
             StrategyItem(
                 strategy_id=strategy_id,
@@ -520,11 +580,13 @@ class RulePlanner:
                     prir.verification_cost,
                     candidate_allocations[strategy_id],
                     native=self.native_attacks,
+                    native_masks=native_masks,
+                    native_rules=native_rules,
                 ),
             )
             for index, strategy_id in enumerate(selected, start=1)
         ]
-        warnings: list[str] = []
+        warnings: list[str] = list(native_warnings)
         if count < len(order):
             skipped = ", ".join(item.value for item in order[count:])
             warnings.append(f"任务预算过小，未加入策略：{skipped}")
@@ -562,8 +624,14 @@ def build_planner(settings: Settings) -> MockPlanner | RulePlanner | LLMPlanner:
             rules_path=(
                 str(settings.rules_path) if settings.rules_path is not None else None
             ),
+            rule_paths=tuple(str(path) for path in settings.wordlist_rule_paths),
             mask_ladder=tuple(settings.mask_ladder),
             hybrid_masks=tuple(settings.hybrid_masks),
+            wordlist_path=(
+                str(settings.wordlist_path)
+                if settings.wordlist_path is not None
+                else None
+            ),
         )
     )
     if settings.planner_type == PlannerType.RULE:
@@ -629,14 +697,174 @@ def _allocate_budget(
     return allocations
 
 
+def _fit_native_units(
+    selected: list[StrategyId],
+    allocations: dict[StrategyId, int],
+    candidate_limit: int,
+    native: NativeAttackSettings,
+    weights: dict[StrategyId, float],
+) -> tuple[dict[StrategyId, tuple[str, ...]], dict[StrategyId, tuple[str, ...]], list[str]]:
+    """给原生攻击单元按键空间分配候选预算，并把掩码阶梯裁剪到预算范围内。
+
+    hashcat 自己枚举原生候选，所以一个单元的"实测候选数"是键空间（掩码乘积、
+    词表条数 × 规则条数…），而不是计划里的 Python 候选数。若不给它们调整预算，
+    实测值会超出分配预算，破坏调度记账不变量
+    （tested ≤ candidate_count ≤ 该单元的分配预算）。
+
+    键空间是精确可知的，因此**优先满足原生单元**：先按各自键空间预留预算，剩余的
+    预算再按权重分给 Python 生成单元。整个原生键空间都装不下时，退化为逐个裁剪
+    （掩码阶梯取能装下的最大掩码、词表由执行层用 hashcat -l 截断）。
+    """
+    overrides: dict[StrategyId, tuple[str, ...]] = {}
+    warnings: list[str] = []
+
+    def _usable(masks: tuple[str, ...], base: int) -> tuple[str, ...]:
+        """丢掉"单靠自己就装不下整个候选预算"的掩码：它们永远跑不起来。"""
+        return tuple(
+            mask
+            for mask in masks
+            if (mask_keyspace(mask) or 0) * max(1, base) <= candidate_limit
+        )
+
+    hybrid_base = max(1, native.wordlist_lines)
+    s6_masks = _usable(native.mask_ladder, 1)
+    s7_masks = _usable(native.hybrid_masks, hybrid_base)
+    rule_overrides: dict[StrategyId, tuple[str, ...]] = {}
+
+    # S1：词表 × 规则链。规则链是**乘积**（66 × 34111 ≈ 225 万条/词），键空间极易超出
+    # 候选预算；装不下时按预算缩短规则链（保留"乘积能装下"的前缀），而不是放弃主力攻击。
+    s1_keyspace = native.s1_keyspace
+    s1_rule_paths = tuple(native.active_rule_paths)
+    if s1_rule_paths and native.wordlist_lines > 0:
+        chosen: list[str] = []
+        product = 1
+        for path in s1_rule_paths:
+            count = max(1, file_line_count(path))
+            if native.wordlist_lines * product * count <= candidate_limit:
+                chosen.append(path)
+                product *= count
+        if tuple(chosen) != s1_rule_paths:
+            rule_overrides[StrategyId.S1] = tuple(chosen)
+            s1_keyspace = (
+                native.wordlist_lines * product if chosen else native.wordlist_lines
+            )
+            warnings.append(
+                "S1 规则链超出候选预算，已缩短为："
+                f"{' × '.join(chosen) if chosen else '（无规则，纯词表）'}"
+            )
+
+    def _mask_total(masks: tuple[str, ...]) -> int | None:
+        return masks_keyspace(masks) if masks else None
+
+    s6_keyspace = _mask_total(s6_masks)
+    s7_factor = _mask_total(s7_masks)
+    s7_keyspace = (
+        native.wordlist_lines * s7_factor
+        if s7_factor is not None and native.wordlist_lines > 0
+        else None
+    )
+    if s6_masks != native.mask_ladder:
+        ignored = [mask for mask in native.mask_ladder if mask not in s6_masks]
+        warnings.append(
+            "S6 掩码阶梯中超出总候选预算的掩码已被忽略："
+            f"{','.join(ignored) or '（全部）'}"
+        )
+    if s7_masks != native.hybrid_masks:
+        ignored = [mask for mask in native.hybrid_masks if mask not in s7_masks]
+        warnings.append(
+            "S7 混合掩码中超出总候选预算的掩码已被忽略："
+            f"{','.join(ignored) or '（全部）'}"
+        )
+
+    units = (
+        (StrategyId.S1, s1_keyspace, (), 1),
+        (StrategyId.S6, s6_keyspace, s6_masks, 1),
+        (StrategyId.S7, s7_keyspace, s7_masks, hybrid_base),
+    )
+    present = [
+        (strategy_id, keyspace, masks, base)
+        for strategy_id, keyspace, masks, base in units
+        if strategy_id in selected and keyspace is not None
+    ]
+    if not present:
+        return overrides, rule_overrides, warnings
+    for strategy_id, _, masks, _ in present:
+        if masks:
+            overrides[strategy_id] = masks
+
+    native_total = sum(keyspace for _, keyspace, _, _ in present)
+    if native_total <= candidate_limit:
+        native_ids = {strategy_id for strategy_id, _, _, _ in present}
+        for strategy_id, keyspace, _, _ in present:
+            allocations[strategy_id] = keyspace
+        others = [item for item in selected if item not in native_ids]
+        if others:
+            rest = max(len(others), candidate_limit - native_total)
+            remapped = _allocate_budget(rest, others, weights)
+            for strategy_id, value in remapped.items():
+                allocations[strategy_id] = value
+        return overrides, rule_overrides, warnings
+
+    for strategy_id, keyspace, masks, base in present:
+        available = candidate_limit - sum(
+            budget for other, budget in allocations.items() if other != strategy_id
+        )
+        if available < 1:
+            available = 1
+        if keyspace <= available:
+            allocations[strategy_id] = max(allocations[strategy_id], keyspace)
+            continue
+        if not masks:
+            # S1：键空间 = 词表条数 × 规则条数，由执行层用 hashcat -l 截断词表。
+            allocations[strategy_id] = available
+            warnings.append(
+                f"{strategy_id.value} 原生键空间 {keyspace} 超出可用候选预算 "
+                f"{available}，将按预算截断词表"
+            )
+            continue
+        kept, used = select_masks_within(masks, base=base, budget=available)
+        if kept:
+            overrides[strategy_id] = tuple(kept)
+            allocations[strategy_id] = max(allocations[strategy_id], used)
+            if len(kept) != len(masks):
+                warnings.append(
+                    f"{strategy_id.value} 掩码阶梯按候选预算裁剪为 "
+                    f"{','.join(kept)}（键空间 {used}）"
+                )
+        else:
+            # 连最小的掩码都装不下：只保留最小的一个作占位，执行层会跳过该单元。
+            smallest = min(
+                masks,
+                key=lambda mask: mask_keyspace(mask) or 0,
+            )
+            overrides[strategy_id] = (smallest,)
+            warnings.append(
+                f"{strategy_id.value} 最小掩码键空间仍超出可用候选预算 {available}，"
+                "本次执行将跳过该单元"
+            )
+    return overrides, rule_overrides, warnings
+
+
 def _rule_parameters(
     strategy_id: StrategyId,
     cost: VerificationCost,
     candidate_budget: int,
     native: "NativeAttackSettings | None" = None,
+    native_masks: "dict[StrategyId, tuple[str, ...]] | None" = None,
+    native_rules: "dict[StrategyId, tuple[str, ...]] | None" = None,
 ) -> dict[str, Any]:
     settings = native or NativeAttackSettings()
+    override = (native_masks or {}).get(strategy_id)
+    rule_override = (native_rules or {}).get(strategy_id)
     if strategy_id == StrategyId.S1:
+        # 词表 × 规则：hashcat 最经典的主力攻击（-a 0 dict.txt -r best66.rule）。
+        # 规则作用在外部词表上，而不是 Python 生成的那几十条基线上；
+        # 多个规则文件是**规则链**（乘积），预算不够时由计划层缩短（rule_override）。
+        rule_paths = (
+            rule_override if rule_override is not None else settings.active_rule_paths
+        )
+        if rule_paths:
+            return {"hashcat_rule_files": list(rule_paths)}
         return {}
     if strategy_id == StrategyId.S2:
         parameters: dict[str, Any] = {
@@ -648,21 +876,18 @@ def _rule_parameters(
             "common_substitution": True,
             "symbol_suffix": True,
         }
-        if settings.rules_path:
-            # 交给 hashcat 的 -r 规则引擎执行，掩码/规则不展开为 Python 候选。
-            parameters["hashcat_rule_files"] = [settings.rules_path]
         return parameters
     if strategy_id == StrategyId.S6:
         # 掩码阶梯：掩码作为 hashcat 参数（-a 3），空间由 hashcat 自己枚举。
         return {
             "hashcat_attack_mode": 3,
-            "hashcat_masks": list(settings.mask_ladder),
+            "hashcat_masks": list(override if override else settings.mask_ladder),
         }
     if strategy_id == StrategyId.S7:
         # 混合攻击：词表 + 掩码（-a 6），掩码直接作为 hashcat 参数。
         return {
             "hashcat_attack_mode": 6,
-            "hashcat_hybrid_mask": list(settings.hybrid_masks),
+            "hashcat_hybrid_mask": list(override if override else settings.hybrid_masks),
         }
     if strategy_id == StrategyId.S3:
         if cost == VerificationCost.HIGH:

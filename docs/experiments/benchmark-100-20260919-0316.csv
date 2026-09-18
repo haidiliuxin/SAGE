@@ -1,0 +1,101 @@
+﻿id,category,password,recovered,hit_strategy,tested,seconds,stop_reason,space_hit_arms,native_units,reason,error,plan_arms,run_status,run_message
+C001,dict+num,summer2023,True,S1,4167936,3.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C002,dict+num,dragon88,True,S1,746496,4.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C003,dict+num,coffee2024,True,S1,4167936,3.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C004,dict+num,monkey123,True,S1,393984,3.2,all_targets_recovered,"S2,S3","S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C005,dict+num,flower99,True,S1,746496,4.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C006,dict+num,guitar007,True,S1,2695680,4.3,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C007,dict+num,banana2020,True,S1,4147200,3.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C008,dict+num,rocket42,True,S1,3566592,4.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C009,dict+num,silver77,True,S1,746496,4.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C010,dict+num,thunder21,True,S1,393984,3.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C011,dict+symbol,P@ssw0rd2024,True,S2,120626997,16.3,all_targets_recovered,"S2,S3","S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C012,dict+symbol,Dr@gon!88,False,,198521706,32.4,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C013,dict+symbol,C0ffee@7,False,,200470890,32.3,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C014,dict+symbol,Monkey#123,True,S1,88874496,8.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C015,dict+symbol,H0use!2021,False,,228064836,32.3,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C016,dict+symbol,Sh@dow99,True,S1,89641728,7.3,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C017,dict+symbol,Summ3r!23,False,,228065229,31.4,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C018,dict+symbol,Winter#2024,True,S3,160289378,20.3,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C019,dict+symbol,Rocket@21,True,S1,89019648,8.3,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C020,dict+symbol,Fl0wer!7,False,,214779123,33.8,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C021,pinyin+num,woaini1314,True,S1,3234816,4.2,all_targets_recovered,"S1,S3","S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C022,pinyin+num,wodemima888,True,S1,6614784,4.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C023,pinyin+num,zhongguo2023,True,S1,4167936,4.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C024,pinyin+num,beijing2008,True,S1,4084992,4.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C025,pinyin+num,shanghai2020,True,S1,4147200,4.3,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C026,pinyin+num,xuexi1234,True,S1,3193344,4.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C027,pinyin+num,gongzuo2024,True,S1,4167936,3.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C028,pinyin+num,jiating666,True,S1,3960576,4.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C029,pinyin+num,pengyou520,True,S1,4022784,4.3,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C030,pinyin+num,laoshi888,True,S1,6863616,4.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C031,pii,zhangsan1998,True,S1,3483648,4.2,all_targets_recovered,S4,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:3287,S4:3059,S6:0,S7:0",completed,真实执行已完成
+C032,pii,Xiaoming_01,True,S1,86199552,7.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:3287,S4:3059,S6:0,S7:0",completed,真实执行已完成
+C033,pii,zhangsan0305,True,S7,216150694,32.4,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:3287,S4:3059,S6:0,S7:0",completed,真实执行已完成
+C034,pii,Xiaoming1998,True,S1,3483648,4.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:3287,S4:3059,S6:0,S7:0",completed,真实执行已完成
+C035,pii,zhangsan7788,True,S1,6925824,3.3,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:3287,S4:3059,S6:0,S7:0",completed,真实执行已完成
+C036,pii,Zhangsan2024,True,S1,4167936,4.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:3287,S4:3059,S6:0,S7:0",completed,真实执行已完成
+C037,pii,xiaoming2001,True,S1,2695680,4.3,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:3287,S4:3059,S6:0,S7:0",completed,真实执行已完成
+C038,pii,zhangsan_1998,True,S4,167798886,22.4,all_targets_recovered,S4,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:3287,S4:3059,S6:0,S7:0",completed,真实执行已完成
+C039,pii,Xiaoming#1998,True,S4,163174758,22.3,all_targets_recovered,S4,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:3287,S4:3059,S6:0,S7:0",completed,真实执行已完成
+C040,pii,zhangsan.work,True,S4,160769382,22.4,all_targets_recovered,S4,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:3287,S4:3059,S6:0,S7:0",completed,真实执行已完成
+C041,reuse,Sunshine2023#,False,,194009987,33.4,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S4:378,S6:0,S7:0",completed,真实执行已完成
+C042,reuse,Admin@2025,True,S4,164830879,22.4,all_targets_recovered,S4,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S4:378,S6:0,S7:0",completed,真实执行已完成
+C043,reuse,Hunter2!2024,True,S4,167256991,22.4,all_targets_recovered,S4,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S4:378,S6:0,S7:0",completed,真实执行已完成
+C044,reuse,Qwerty2024,True,S1,4167936,3.2,all_targets_recovered,"S2,S3,S4","S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S4:378,S6:0,S7:0",completed,真实执行已完成
+C045,reuse,sunshine2023!,True,S4,168003487,22.3,all_targets_recovered,S4,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S4:378,S6:0,S7:0",completed,真实执行已完成
+C046,reuse,Admin@2020!,True,S4,161844895,22.3,all_targets_recovered,S4,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S4:378,S6:0,S7:0",completed,真实执行已完成
+C047,reuse,hunter2!2018,True,S4,158426380,22.3,all_targets_recovered,S4,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S4:378,S6:0,S7:0",completed,真实执行已完成
+C048,reuse,Qwerty2019!,True,S4,163879948,22.5,all_targets_recovered,S4,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S4:378,S6:0,S7:0",completed,真实执行已完成
+C049,reuse,Sunshine2019,True,S1,4147200,4.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S4:378,S6:0,S7:0",completed,真实执行已完成
+C050,reuse,Admin2025,True,S1,4167936,4.2,all_targets_recovered,"S2,S3","S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S4:378,S6:0,S7:0",completed,真实执行已完成
+C051,keyboard,1qaz2wsx,True,S1,622080,3.3,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C052,keyboard,qazwsx123,True,S1,393984,4.3,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C053,keyboard,zxcvbnm!,False,,228068154,33.4,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C054,keyboard,1q2w3e4r,True,S1,622080,4.5,all_targets_recovered,"S1,S3","S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C055,keyboard,asdfghjkl1,True,S1,974592,4.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C056,keyboard,qwerty789,True,S1,6531840,3.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C057,keyboard,poiuytrewq,True,S1,16733952,3.4,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C058,keyboard,1qaz@wsx,True,S1,88604928,8.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C059,keyboard,zxcasdqwe,False,,228069130,32.4,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C060,keyboard,qweasdzxc2,False,,218212483,33.4,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C061,phrase,correct-horse,False,,193632304,32.5,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C062,phrase,iloveyou2,True,S1,393984,4.3,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C063,phrase,letmein123,True,S1,974592,3.3,all_targets_recovered,"S2,S3","S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C064,phrase,mypassword2024,True,S1,4167936,4.4,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C065,phrase,trustno1,True,S1,746496,4.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C066,phrase,opensesame,True,S1,974592,3.3,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C067,phrase,helloworld88,True,S1,974592,3.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C068,phrase,goodmorning7,True,S1,974592,3.2,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C069,phrase,ilovechina2020,False,,228069130,33.4,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C070,phrase,welcometothejungle,False,,218059312,33.4,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C071,leet,Tr0ub4dor&3,False,,228069130,32.4,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C072,leet,P@ssw0rd!,True,S1,90740736,8.3,all_targets_recovered,"S2,S3","S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C073,leet,Adm1n1str@tor,False,,213435523,32.4,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C074,leet,S3cur1ty2024,False,,228069469,31.6,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C075,leet,H@ck3r2020,False,,218980054,33.4,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C076,leet,M@st3rP13ce,False,,228069469,33.4,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C077,leet,D@rkN1ght99,False,,228069469,32.5,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C078,leet,Bl@ckW1d0w,False,,228069469,32.4,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C079,leet,Cyb3rPunk2077,False,,228069469,32.4,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C080,leet,N3v3rG0nna,False,,223127254,33.5,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C081,cn+mixed,密码123,True,S1,393984,4.3,all_targets_recovered,"S1,S3","S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:3287,S4:3059,S6:0,S7:0",completed,真实执行已完成
+C082,cn+mixed,我的密码2024,True,S1,4167936,4.3,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:3287,S4:3059,S6:0,S7:0",completed,真实执行已完成
+C083,cn+mixed,张三@1998,True,S4,168466631,22.5,all_targets_recovered,S4,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:3287,S4:3059,S6:0,S7:0",completed,真实执行已完成
+C084,cn+mixed,生日快乐2024,True,S1,4167936,4.7,all_targets_recovered,"S2,S3","S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:3287,S4:3059,S6:0,S7:0",completed,真实执行已完成
+C085,cn+mixed,woaini520!,True,S5,165417885,13.3,all_targets_recovered,"S2,S3","S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:3287,S4:3059,S6:0,S7:0",completed,真实执行已完成
+C086,cn+mixed,xiaoming_2001,False,,208366251,34.5,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:3287,S4:3059,S6:0,S7:0",completed,真实执行已完成
+C087,cn+mixed,zhang@123,True,S1,104737536,8.3,all_targets_recovered,,"S1:2770281,S6:46164576,S7:818181",命中,,"S1:45,S5:0,S2:2714,S3:3287,S4:3059,S6:0,S7:0",completed,真实执行已完成
+C088,cn+mixed,123456abc,False,,209900715,33.5,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:3287,S4:3059,S6:0,S7:0",completed,真实执行已完成
+C089,cn+mixed,a1b2c3d4,False,,215699991,33.5,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:3287,S4:3059,S6:0,S7:0",completed,真实执行已完成
+C090,cn+mixed,password!@#2024,False,,210087339,33.5,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:3287,S4:3059,S6:0,S7:0",completed,真实执行已完成
+C091,hard(对照),X7#kL9$mQ2,False,,228077488,33.5,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C092,hard(对照),vN4$tR8*wZ,False,,228069469,32.4,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C093,hard(对照),9f2K!pQ7#x,False,,224757379,33.5,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C094,hard(对照),m3L$vB8nQ1!,False,,228069469,32.4,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C095,hard(对照),Zx9!Rk2#Wt,False,,214099075,31.4,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C096,hard(对照),7uJ#pL4$xN,False,,228069469,33.6,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C097,hard(对照),Qw8$Zr3!Vm,False,,228069469,31.4,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C098,hard(对照),Lk5#Bn9$Xy,False,,228069469,32.6,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C099,hard(对照),Tf2!Wq7#Rp,False,,228069469,32.4,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成
+C100,hard(对照),8hM$xK4!Vd,False,,219179395,32.5,candidates_exhausted,,"S1:2770281,S6:46164576,S7:818181","Python 候选空间未覆盖；原生单元已实测仍未命中（S1:2770281,S6:46164576,S7:818181）",,"S1:45,S5:0,S2:2714,S3:4119,S6:0,S7:0",completed,真实执行已完成

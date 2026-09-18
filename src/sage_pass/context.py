@@ -169,6 +169,49 @@ def iter_context_candidates(
                 break
         if len(emitted) >= limit:
             break
+    # 个人信息组合扩展：带分隔符的"词根 + 年份/生日/号码"（如 zhangsan_1998、Xiaoming#0305）。
+    separators = ("_", "#", "@", ".", "-")
+    personal_suffixes: list[tuple[str, CandidateSource]] = []
+    if context.birthday:
+        digits = re.findall(r"\d+", context.birthday)
+        if len(digits) >= 2:
+            month, day = int(digits[0]), int(digits[1])
+            for item in (f"{month:02d}{day:02d}", f"{month}{day}", f"{month:02d}", f"{day:02d}"):
+                personal_suffixes.append(
+                    (item, CandidateSource(kind="birthday", original=item, normalized=item))
+                )
+    if context.phone_suffix:
+        personal_suffixes.append((
+            str(context.phone_suffix),
+            CandidateSource(kind="phone_suffix", original=str(context.phone_suffix), normalized=str(context.phone_suffix)),
+        ))
+    combined_source = CandidateSource(
+        kind="personalized_combination", template="root+separator+suffix"
+    )
+    root_variants: list[tuple[str, CandidateSource]] = []
+    for value, source in (*bases, *derived):
+        root_variants.append((value, source))
+        capitalized = value[:1].upper() + value[1:]
+        if capitalized != value:
+            root_variants.append((capitalized, source))
+    for value, source in root_variants:
+        for separator in separators:
+            for year, year_source in years:
+                _remember(
+                    emitted,
+                    f"{value}{separator}{year}",
+                    (source, year_source, combined_source),
+                    limit=limit,
+                )
+            for suffix, suffix_source in personal_suffixes:
+                _remember(
+                    emitted,
+                    f"{value}{separator}{suffix}",
+                    (source, suffix_source, combined_source),
+                    limit=limit,
+                )
+        if len(emitted) >= limit:
+            break
     yield from emitted.values()
 
 

@@ -1,0 +1,3 @@
+[training_settings]
+encoding = utf-8
+ngram = 4

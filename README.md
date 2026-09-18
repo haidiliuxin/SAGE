@@ -17,7 +17,11 @@ SAGE-Pass 是面向异构离线口令安全评测任务的智能策略编排系�
 - Mock Executor：启动模拟执行、查询执行状态、返回最终模拟结果；
 - Hashcat Adapter：真实执行的启动、停止（取消）、时间预算自动停止与恢复结果解析（含 `$HEX[]`）；
 - ZIP Adapter：zip2john 提取 WinZip AES（`$zip2$`，hashcat 13600）与传统 PKZIP / ZipCrypto（`$pkzip2$`，按结构选 17200/17210/17225/17230），两者都可进入真实执行；
-- 原生攻击单元（第 2 步）：配置 `SAGE_RULES_PATH` / `SAGE_MASK_LADDER` / `SAGE_HYBRID_MASKS` 后，规划层自动纳入 **S6（掩码/暴力，`-a 3`）** 与 **S7（混合攻击，`-a 6`）**，S2 可改用 hashcat `-r` 规则引擎；掩码直接作为 hashcat 参数、空间由 hashcat 自己枚举，不由后端展开（`SAGE_PLANNER_TYPE=rule`）；
+- 中文与低频口令支持（第 3 步优化）：内置中文种子词表 `data/wordlists/zh-base.txt`（可用 `SAGE_SEED_WORDLISTS` 追加）作为 S1/S2/S3 的种子；个人信息组合新增"词根+分隔符+年份/生日/号码"（如 `zhangsan_1998`、`Xiaoming#0305`）；默认掩码阶梯与混合掩码覆盖年份与常见符号后缀；
+- 词表 × 规则（第 3 步优化）：`SAGE_WORDLIST_RULES` 指定作用于散列词表的规则文件（可多个），**S1 的原生词表作业会带上 `-r`**（`hashcat -a 0 dict.txt -r best66.rule`），形成 hashcat 最经典的"词表 × 规则"攻击；S2 保持"Python 规则变形候选"，不再叠加 `-r`（避免规则二次作用）；
+- 候选记账与预算适配（第 3 步优化）：原生攻击（词表 × 规则 / 掩码 / 词表 × 掩码）的候选由 hashcat 自己枚举，`keyspace.py` 给出统一键空间模型（`-a 3` 掩码乘积、`-a 0` 词表条数 × 规则条数、`-a 6/7` 词表条数 × 掩码键空间）；规划层**优先按键空间给原生单元分配候选预算**并裁掉永远跑不起来的掩码，执行层用 `hashcat -l/--limit` 与掩码裁剪兜底，确实装不下时优雅跳过该单元而不是中断整个运行（保证 `实测候选数 ≤ 提交量 ≤ 该单元分配预算`）；
+- 低内存自适应（第 3 步优化）：`SAGE_HASHCAT_OPTIMIZED` / `SAGE_HASHCAT_KERNEL_ACCEL|LOOPS|THREADS` / `SAGE_HASHCAT_DEVICE_TYPES`；遇到显存或主机内存不足时自动按 `-O -n1 -u1 -T1` 降级重试一次；hashcat 失败原因（stderr 首行 + 退出码）会回传到运行消息；
+- 原生攻击单元（第 2 步）：配置 `SAGE_RULES_PATH` / `SAGE_MASK_LADDER` / `SAGE_HYBRID_MASKS` 后，规划层自动纳入 **S6（掩码/暴力，`-a 3`）** 与 **S7（混合攻击，`-a 6`，词 + 年份/后缀）**；掩码直接作为 hashcat 参数、空间由 hashcat 自己枚举，不由后端展开（`SAGE_PLANNER_TYPE=rule`）；原生批次同样保留 `hashcat-sessions/<run>/<单元>-<批次>/`（argv、stdout、session.json）便于复盘；
 - 真实场景执行（第 1 步）：S1 可切换为 **hashcat 原生词表攻击**（`SAGE_WORDLIST_PATH` 或任务上传的词表文件，由 hashcat 单进程按需流式读取整本字典、不做候选物化），候选管线**惰性流式生成**（`CandidatePlanStream`：只生成被调度到的批次、跨生成器去重索引，重启后按流快照恢复；hashcat 批次使用持久会话目录以支持续跑），决策批次大小可配置（`SAGE_DECISION_BATCH_SIZE`），并支持**命中即停**（`stop_on_hit`，命中后立即结束并记 `all_targets_recovered`）；前端可粘贴/上传 `.txt` 词表作为候选或作为原生字典；
 - PDF/Office Adapter（A 冲刺第 2 周）：pdf2john / office2john 提取加密目标，模式覆盖 10400/10500/10600/10700/10510 与 9700/9800/9400/9500/9600；
 - 数据库迁移：`migrations.py` 版本化幂等迁移（`schema_migrations`），建表后自动应用；

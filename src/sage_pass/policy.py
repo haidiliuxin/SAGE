@@ -94,7 +94,10 @@ def _bounded_number(minimum: float, maximum: float) -> ParameterRule:
 BOOL_RULE = ParameterRule(_is_bool, "布尔值")
 
 STRATEGY_PARAMETER_RULES: dict[StrategyId, dict[str, ParameterRule]] = {
-    StrategyId.S1: {},
+    StrategyId.S1: {
+        # 词表 × 规则：规则文件由 hashcat 的 -r 直接作用在外部词表上。
+        "hashcat_rule_files": _string_list_rule(max_items=8, max_length=512),
+    },
     StrategyId.S2: {
         "hashcat_rule_files": _string_list_rule(max_items=8, max_length=512),
         "capitalize_first": BOOL_RULE,

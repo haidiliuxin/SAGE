@@ -50,13 +50,17 @@ def test_rule_planner_adds_mask_and_hybrid_units_when_configured():
     assert StrategyId.S6 in ids, ids
     assert StrategyId.S7 in ids, ids
     by_id = {item.strategy_id: item for item in plan.strategies}
-    assert by_id[StrategyId.S2].parameters["hashcat_rule_files"] == [
+    # 词表 × 规则由 S1 的原生词表攻击承担（hashcat 最经典的主力攻击）。
+    assert by_id[StrategyId.S1].parameters["hashcat_rule_files"] == [
         "rules/best64.rule"
     ]
+    assert "hashcat_rule_files" not in by_id[StrategyId.S2].parameters
+    # 掩码阶梯按候选预算裁剪：?l?l?l?l（456976）装不进本单元的预算，只保留 ?d?d?d?d。
     assert by_id[StrategyId.S6].parameters == {
         "hashcat_attack_mode": 3,
-        "hashcat_masks": ["?d?d?d?d", "?l?l?l?l"],
+        "hashcat_masks": ["?d?d?d?d"],
     }
+    assert by_id[StrategyId.S6].candidate_budget >= 10_000
     assert by_id[StrategyId.S7].parameters == {
         "hashcat_attack_mode": 6,
         "hashcat_hybrid_mask": ["?d?d"],
