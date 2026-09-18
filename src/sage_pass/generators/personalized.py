@@ -162,13 +162,48 @@ def iter_history_records(
             components=(historical_shape(password).signature,),
         )
         roots = historical_roots(password)
-        values: list[tuple[str, CandidateSource]] = []
-        for value in (password.lower(), password.upper(), password[:1].upper() + password[1:].lower(), password.swapcase()):
-            values.append((value, base_source))
-        if current_year and _YEAR_RE.search(password):
-            values.append((_YEAR_RE.sub(current_year, password), CandidateSource(
-                kind="historical_structure", template="year-replacement", components=(masked,)
-            )))
+        values: list[tuple[str, CandidateSource]] = [(password, base_source)]
+        case_variants = tuple(dict.fromkeys((
+            password,
+            password.lower(),
+            password.upper(),
+            password[:1].upper() + password[1:].lower(),
+            password.swapcase(),
+        )))
+        values.extend((value, base_source) for value in case_variants[1:])
+
+        # 优先覆盖最常见的一步迁移：保留完整历史口令，只追加常用符号。
+        # 来源只保存脱敏结构，不把历史口令明文写入研究日志。
+        for value in case_variants:
+            for symbol in symbols:
+                if not value.endswith(symbol):
+                    values.append((f"{value}{symbol}", CandidateSource(
+                        kind="historical_structure",
+                        template="full-password-symbol-suffix",
+                        components=(masked,),
+                    )))
+
+        # 完整口令已有年份时逐个替换；没有年份时逐个追加。years 已按
+        # 出生年份、用户相关年份、历史年份、当前年份、默认年份排序。
+        has_year = bool(_YEAR_RE.search(password))
+        for value in case_variants:
+            for year in years:
+                migrated = (
+                    _YEAR_RE.sub(year, value)
+                    if has_year
+                    else f"{value}{year}"
+                )
+                if migrated != value:
+                    values.append((migrated, CandidateSource(
+                        kind="historical_structure",
+                        template=(
+                            "full-password-year-replacement"
+                            if has_year
+                            else "full-password-year-suffix"
+                        ),
+                        components=(masked,),
+                    )))
+
         for root in roots:
             values.append((root, CandidateSource(
                 kind="historical_structure", template="word-root", components=(masked,)

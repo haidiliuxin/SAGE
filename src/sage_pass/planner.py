@@ -727,6 +727,15 @@ def _cache_key(profile: dict[str, Any], model: str) -> str:
 def _build_strategy_plan(prir: PRIR, proposal: _LLMPlan) -> StrategyPlan:
     strategies: list[StrategyItem] = []
     for item in proposal.strategies:
+        parameters = dict(item.parameters)
+        if item.strategy_id == StrategyId.S2:
+            # LLM 协议只负责选择和分配预算，parameters 必须为空；S2 的
+            # 可执行规则由本地可信策略层补齐，避免给空规则单元分配预算。
+            parameters = _rule_parameters(
+                item.strategy_id,
+                prir.verification_cost,
+                item.candidate_budget,
+            )
         strategies.append(
             StrategyItem(
                 strategy_id=item.strategy_id,
@@ -737,7 +746,7 @@ def _build_strategy_plan(prir: PRIR, proposal: _LLMPlan) -> StrategyPlan:
                 time_budget=item.time_budget,
                 candidate_budget=item.candidate_budget,
                 reason=item.reason,
-                parameters=item.parameters,
+                parameters=parameters,
             )
         )
     return StrategyPlan(

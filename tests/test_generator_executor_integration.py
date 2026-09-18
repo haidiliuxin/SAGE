@@ -96,7 +96,7 @@ def test_real_executor_pipeline_routes_history_to_personalized_generator(tmp_pat
     ))
     assert batches[0].generator_id == "history"
     assert batches[0].candidates == (
-        "admin2020!", "ADMIN2020!", "Admin2020!"
+        "Admin2020!", "admin2020!", "ADMIN2020!"
     )
     executor.shutdown()
     database.dispose()

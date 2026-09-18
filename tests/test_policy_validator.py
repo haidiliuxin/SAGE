@@ -172,6 +172,42 @@ def test_rejects_unknown_wrong_type_and_out_of_range_parameters(
     assert expected_code in issue_codes(captured.value)
 
 
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {},
+        {
+            "capitalize_first": False,
+            "all_upper": False,
+            "all_lower": False,
+            "common_number_suffix": False,
+            "year_suffix": False,
+            "common_substitution": False,
+            "symbol_suffix": False,
+        },
+    ],
+)
+def test_rejects_s2_without_an_effective_rule(parameters):
+    with pytest.raises(PolicyValidationError) as captured:
+        PolicyValidator().validate(
+            make_prir(),
+            plan([strategy(StrategyId.S2, parameters=parameters)]),
+        )
+
+    assert "S2_RULE_REQUIRED" in issue_codes(captured.value)
+
+
+def test_accepts_s2_with_a_hashcat_rule_file():
+    candidate = plan([
+        strategy(
+            StrategyId.S2,
+            parameters={"hashcat_rule_files": ["best64.rule"]},
+        )
+    ])
+
+    assert PolicyValidator().validate(make_prir(), candidate) is candidate
+
+
 def test_rejects_duplicate_strategy_and_non_contiguous_priority():
     candidate = plan(
         [
