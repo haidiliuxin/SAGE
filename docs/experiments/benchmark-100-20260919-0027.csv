@@ -1,0 +1,4 @@
+﻿id,category,password,recovered,hit_strategy,tested,seconds,stop_reason,space_hit_arms,reason,error
+C001,dict+num,summer2023,False,,0,3.2,execution_failed,,候选空间未覆盖：生成器能力不足,
+C002,dict+num,dragon88,False,,0,3.1,execution_failed,,候选空间未覆盖：生成器能力不足,
+C003,dict+num,coffee2024,False,,0,2.1,execution_failed,,候选空间未覆盖：生成器能力不足,
