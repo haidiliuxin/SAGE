@@ -140,5 +140,11 @@ def test_executor_runs_mask_and_hybrid_units_as_native_attacks(
     assert mask_entry["masks"], mask_entry
     hybrid_entry = next(e for e in entries if e["attack_mode"] == "6")
     assert hybrid_entry["masks"], hybrid_entry
-    # 混合攻击的字典来自服务器端词表，直接作为 hashcat 位置参数传入。
-    assert str(wordlist) in " ".join(hybrid_entry["argv"]), hybrid_entry["argv"]
+    # 混合攻击的字典来自服务器端词表：自适应切片会把它切成本批次的词表切片文件，
+    # 内容仍来自这本词表（不是 Python 候选）。
+    wordlist_arg = hybrid_entry["argv"][-2]
+    assert "wordlist-slices" in wordlist_arg, hybrid_entry["argv"]
+    assert "dict.txt" in wordlist_arg, hybrid_entry["argv"]
+    assert Path(wordlist_arg).read_text(encoding="utf-8").splitlines() == [
+        line for line in wordlist.read_text(encoding="utf-8").splitlines()
+    ], wordlist_arg

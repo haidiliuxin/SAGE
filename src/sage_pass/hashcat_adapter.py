@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .enums import TaskStatus
 from .errors import AppError
-from .keyspace import file_line_count, native_keyspace
+from .keyspace import effective_wordlist_lines, native_keyspace
 
 
 HASHCAT_MODES = {
@@ -94,10 +94,11 @@ class HashcatJob:
     inline_rules: tuple[str, ...] = ()
     masks: tuple[str, ...] = ()
     custom_charsets: tuple[str, ...] = ()
-    # 词表条数上限（hashcat `-l/--limit`）：把原生攻击的键空间压到调度分配的候选
-    # 预算内，保证"实测候选数 ≤ 分配预算"。（`-l` 限制的是词表条数，规则/掩码会按
-    # 倍数放大，因此调用方需按 keyspace.native_keyspace 计算安全条数。）
+    # 词表条数上限与起始偏移（hashcat `-s/--skip` + `-l/--limit`）：把原生攻击切成
+    # 多个可观测的小批次，让调度器每批之后都能重新选臂（自适应切片）。
+    # `-l` 是"从起点算起的绝对条数"，因此切片必须同时给 skip 与 limit。
     wordlist_limit: int | None = None
+    wordlist_skip: int | None = None
     # 低内存 / 低显存适配：-O 优化内核、-n/-u/-T 限制内核资源、-D 选择设备类型。
     # hashcat 要求 -n/-u 必须与 -O 同时使用，因此设置内核参数时自动开启优化内核。
     optimized: bool = False
@@ -182,7 +183,11 @@ class HashcatHandle:
         self.keyspace = native_keyspace(
             attack_mode=job.attack_mode,
             wordlist_lines=(
-                file_line_count(external_wordlist)
+                effective_wordlist_lines(
+                    external_wordlist,
+                    skip=job.wordlist_skip,
+                    limit=job.wordlist_limit,
+                )
                 if external_wordlist is not None
                 else 0
             ),
@@ -307,7 +312,7 @@ class HashcatHandle:
                 "\t",
                 *_custom_charset_args(custom_charsets),
                 *_rule_args(rule_files, self._inline_rule_path if inline_rules else None),
-                *_wordlist_limit_args(job.wordlist_limit),
+                *_wordlist_limit_args(job.wordlist_limit, job.wordlist_skip),
                 str(self._target_path),
                 *_attack_position_args(
                     job.attack_mode,
@@ -691,6 +696,36 @@ def _validate_attack_contract(
             status_code=422,
             details={"attack_mode": job.attack_mode, "is_native": job.is_native},
         )
+    if job.wordlist_skip is not None:
+        # `-l` 是"从起点算起的绝对条数"，所以切片必须同时给出 skip 与 limit。
+        if job.attack_mode == 3 or not job.is_native:
+            raise AppError(
+                "EXECUTION_FAILED",
+                "Hashcat 词表偏移切片（-s/-l）仅适用于带外部词表的攻击",
+                status_code=422,
+                details={"attack_mode": job.attack_mode, "is_native": job.is_native},
+            )
+        if job.wordlist_limit is None or job.wordlist_limit <= job.wordlist_skip:
+            raise AppError(
+                "EXECUTION_FAILED",
+                "Hashcat 词表切片要求 0 ≤ skip < limit（-l 为绝对条数）",
+                status_code=422,
+                details={
+                    "wordlist_skip": job.wordlist_skip,
+                    "wordlist_limit": job.wordlist_limit,
+                },
+            )
+        if len(masks) > 1:
+            # hashcat 7.1.2：`Use of --skip/--limit is not supported with --increment,
+            # mask files, multiple dictionaries, or --stdout.`
+            # 多掩码会被写成 masks.hcmask（掩码文件），与 -s/-l 冲突；执行层改用
+            # "切片词表文件"（见 real_executor._slice_wordlist），不要在这里硬闯。
+            raise AppError(
+                "EXECUTION_FAILED",
+                "Hashcat 的 -s/-l 不能与掩码文件同时使用；请改用切片词表文件",
+                status_code=422,
+                details={"mask_count": len(masks)},
+            )
 
 
 def _custom_charset_args(custom_charsets: Sequence[str]) -> list[str]:
@@ -712,13 +747,23 @@ def _rule_args(
     return args
 
 
-def _wordlist_limit_args(wordlist_limit: int | None) -> list[str]:
-    """词表条数上限：把原生攻击的实测候选数压到分配预算内。"""
-    if wordlist_limit is None:
+def _wordlist_limit_args(
+    wordlist_limit: int | None,
+    wordlist_skip: int | None = None,
+) -> list[str]:
+    """词表切片：`-s`（起始条数）+ `-l`（从起点算起的绝对条数）。
+
+    既用于把原生攻击压回分配预算，也用于自适应切片（把大键空间拆成多个可观测批次）。
+    """
+    if wordlist_limit is None and wordlist_skip is None:
         return []
-    if wordlist_limit <= 0:
+    if wordlist_limit is None or wordlist_limit <= 0:
         raise ValueError("wordlist_limit must be positive")
-    return ["-l", str(wordlist_limit)]
+    args: list[str] = []
+    if wordlist_skip:
+        args += ["-s", str(int(wordlist_skip))]
+    args += ["-l", str(int(wordlist_limit))]
+    return args
 
 
 def _attack_position_args(

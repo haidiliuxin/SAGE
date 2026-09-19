@@ -55,6 +55,12 @@ elif attack_mode == "7":
 if wordlist:
     with open(wordlist, encoding="utf-8") as fh:
         candidates = [line.rstrip("\r\n") for line in fh]
+    # 与 hashcat 一致：-s 跳过前 N 条，-l 是从起点算起的绝对条数（切片语义）。
+    skip = arg_value("-s") or arg_value("--skip")
+    limit = arg_value("-l") or arg_value("--limit")
+    start = int(skip) if skip else 0
+    end = int(limit) if limit else len(candidates)
+    candidates = candidates[start:end]
 else:
     candidates = []
 if masks and os.path.isfile(masks[0]):
@@ -69,6 +75,11 @@ total = len(candidates)
 if slow:
     time.sleep(slow)
 
+# 模拟"被时间预算截断"：只测到 FAKE_HASHCAT_TESTED_CAP 条候选（用于验证切片进度
+# 按**实测**条数推进，而不是按请求的切片大小推进）。
+cap = os.environ.get("FAKE_HASHCAT_TESTED_CAP", "")
+reported = min(total, int(cap)) if cap else total
+
 log_path = os.environ.get("FAKE_HASHCAT_LOG", "")
 if log_path:
     with open(log_path, "a", encoding="utf-8") as lf:
@@ -82,8 +93,7 @@ if log_path:
             "rules": [args[index + 1] for index, arg in enumerate(args) if arg == "-r" and index + 1 < len(args)],
         }, ensure_ascii=False) + "\n")
 
-print(json.dumps({"progress": [total, 0], "percent": 100}))
-sys.stdout.flush()
+print(json.dumps({"progress": [reported, total], "percent": 100}))
 
 if not no_recover and outfile and candidates and targets:
     plain = candidates[0]

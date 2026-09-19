@@ -142,6 +142,20 @@ class Settings:
     hybrid_masks: tuple[str, ...] = ("?d", "?d?d", "?d?d?d?d", "!", "@", "!?d")
     # 额外种子词表（例如中文常见口令词表）：内容作为 S1/S2/S3 的种子并进入 Python 候选。
     seed_wordlists: tuple[Path, ...] = ()
+    # 自适应切片：把原生攻击（词表 × 规则链 / 掩码 / 词表 × 掩码）切成多个可观测批次，
+    # 让调度器每批之后都能按实测产出重新选臂（而不是一次拉完整段键空间）。
+    # 代价是每多一批多一次 hashcat 启动（约 2~3 秒），因此首批是"探针"、之后倍增。
+    adaptive_slicing: bool = True
+    adaptive_probe_divisor: int = 8
+    adaptive_min_slice_keys: int = 100_000
+    # 探针按"目标 GPU 工作时长"定大小：已知实测速率（键/秒）时用 速率 × 秒数，
+    # 否则用 adaptive_probe_keys 作为保守起点。探针只占该单元时间预算的一小部分，
+    # 剩下的预算留给后续"提交"批次，避免探针就把预算吃光。
+    adaptive_probe_seconds: float = 1.0
+    adaptive_probe_keys: int = 2_000_000
+    # 探针之后的放大倍数：8.0 = 探针（键空间的 1/divisor）之后一次提交剩余全部，
+    # 让每个原生单元只多一次 hashcat 启动开销；调小可得到更多决策点、更多启动开销。
+    adaptive_growth: float = 8.0
     # 低内存 / 低显存适配（8GB 显存或主机内存紧张时建议开启）。
     hashcat_optimized: bool = False
     hashcat_kernel_accel: int | None = None
@@ -154,6 +168,12 @@ class Settings:
     def __post_init__(self) -> None:
         if self.hashcat_stream_batch_size <= 0:
             raise ValueError("hashcat_stream_batch_size 必须大于 0")
+        if self.adaptive_probe_divisor <= 0:
+            raise ValueError("adaptive_probe_divisor 必须大于 0")
+        if self.adaptive_min_slice_keys <= 0:
+            raise ValueError("adaptive_min_slice_keys 必须大于 0")
+        if self.adaptive_growth < 1.0:
+            raise ValueError("adaptive_growth 必须大于等于 1")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -251,6 +271,29 @@ class Settings:
                 if (value := os.getenv("SAGE_WORDLIST_PATH"))
                 else None
             ),
+            adaptive_slicing=os.getenv("SAGE_ADAPTIVE_SLICING", "true")
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"},
+            adaptive_probe_divisor=_parse_optional_int(
+                os.getenv("SAGE_ADAPTIVE_PROBE_DIVISOR", "8"),
+                "SAGE_ADAPTIVE_PROBE_DIVISOR",
+            )
+            or 8,
+            adaptive_min_slice_keys=_parse_optional_int(
+                os.getenv("SAGE_ADAPTIVE_MIN_SLICE_KEYS", "100000"),
+                "SAGE_ADAPTIVE_MIN_SLICE_KEYS",
+            )
+            or 100_000,
+            adaptive_probe_seconds=float(
+                os.getenv("SAGE_ADAPTIVE_PROBE_SECONDS", "1.0")
+            ),
+            adaptive_probe_keys=_parse_optional_int(
+                os.getenv("SAGE_ADAPTIVE_PROBE_KEYS", "2000000"),
+                "SAGE_ADAPTIVE_PROBE_KEYS",
+            )
+            or 2_000_000,
+            adaptive_growth=float(os.getenv("SAGE_ADAPTIVE_GROWTH", "8.0")),
             rules_path=(
                 _as_path(value)
                 if (value := os.getenv("SAGE_RULES_PATH"))

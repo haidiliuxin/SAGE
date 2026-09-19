@@ -48,7 +48,9 @@ WORK = REPO_ROOT / "data" / "benchmark"
 
 # 时间预算：规则链键空间大（2.1 亿键 ≈ 9 秒纯 GPU 时间 + 3 秒启动），
 # 30 秒的整轮预算会把 S1 的份额（20% = 6 秒）压到跑不完。
-TIME_BUDGET = 60
+# 自适应切片开启时每个原生单元要多一次"探针"启动（规则链加载本身就要数秒），
+# 因此评测用 120 秒，让每个单元都有"探针 + 提交"的空间。
+TIME_BUDGET = 120
 # 原生攻击（词表 × 规则链 / 掩码 / 词表 × 掩码）由 hashcat 自己枚举候选：
 # 候选预算必须容纳这些键空间，否则计划层会裁掉它们。
 CANDIDATE_BUDGET = 1_000_000_000
@@ -214,6 +216,21 @@ def main() -> int:
         action="store_true",
         help="只做候选空间覆盖分析（不调用 hashcat，可在无 GPU/内存紧张时使用）",
     )
+    parser.add_argument(
+        "--scheduler",
+        default="heuristic_bandit",
+        help="调度器类型：heuristic_bandit（自适应）| fixed | round_robin | ucb",
+    )
+    parser.add_argument(
+        "--no-adaptive-slicing",
+        action="store_true",
+        help="关闭原生单元的自适应切片（对照：一次拉完整段键空间的旧行为）",
+    )
+    parser.add_argument(
+        "--tag",
+        default="",
+        help="结果文件附加标签（例如 adaptive / fixed-noslice）",
+    )
     args = parser.parse_args()
 
     WORK.mkdir(parents=True, exist_ok=True)
@@ -228,7 +245,10 @@ def main() -> int:
     os.environ["SAGE_HASHCAT_PATH"] = HASHCAT
     os.environ["SAGE_ZIP2JOHN_PATH"] = str(Path(JOHN_RUN) / "zip2john.exe")
     os.environ["SAGE_PLANNER_TYPE"] = "rule"
-    os.environ["SAGE_SCHEDULER_TYPE"] = "heuristic_bandit"
+    os.environ["SAGE_SCHEDULER_TYPE"] = args.scheduler
+    os.environ["SAGE_ADAPTIVE_SLICING"] = (
+        "false" if args.no_adaptive_slicing else "true"
+    )
     os.environ["SAGE_WORDLIST_PATH"] = str(wordlist_path)
     os.environ["SAGE_RULES_PATH"] = RULES
     # 词表 × 规则：多个规则文件（逗号分隔），S1 的原生词表作业会带 -r。
@@ -263,6 +283,8 @@ def main() -> int:
     print(f"配置：时间预算 {TIME_BUDGET}s / 候选预算 {CANDIDATE_BUDGET}；"
           f"批大小 {STREAM_BATCH_SIZE}；规则 {','.join(Path(r).name for r in RULE_FILES)}；"
           f"掩码 {MASK_LADDER}；混合 {HYBRID_MASKS}", flush=True)
+    print(f"调度器 {args.scheduler}；自适应切片 "
+          f"{'关闭' if args.no_adaptive_slicing else '开启'}", flush=True)
 
     rows: list[dict] = []
     with TestClient(app) as client:
@@ -282,7 +304,7 @@ def main() -> int:
                 "id": case["id"], "category": case["category"], "password": case["password"],
                 "recovered": False, "hit_strategy": "", "tested": 0, "seconds": 0.0,
                 "stop_reason": "", "space_hit_arms": "", "native_units": "",
-                "reason": "", "error": "",
+                "reason": "", "error": "", "run_id": "",
             }
             started = time.monotonic()
             try:
@@ -359,6 +381,7 @@ def main() -> int:
                     f"/api/tasks/{task_id}/execute", json={"mode": "real", "stop_on_hit": True}
                 )
                 run_id = started_run.json()["run_id"]
+                row["run_id"] = run_id
                 deadline = time.monotonic() + 180
                 while time.monotonic() < deadline:
                     status = client.get(f"/api/runs/{run_id}/status").json()
@@ -407,7 +430,8 @@ def main() -> int:
     out_dir = REPO_ROOT / args.out
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
-    csv_path = out_dir / f"benchmark-100-{stamp}.csv"
+    suffix = f"-{args.tag}" if args.tag else ""
+    csv_path = out_dir / f"benchmark-100-{stamp}{suffix}.csv"
     with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
         writer.writeheader()
@@ -423,6 +447,8 @@ def main() -> int:
         f"# 100 道口令评测报告（{datetime.now().strftime('%Y-%m-%d %H:%M')}）",
         "",
         f"- 命中：**{hit}/{total}**（{hit / total * 100:.1f}%）",
+        f"- 调度器：`{args.scheduler}`；自适应切片："
+        f"{'关闭' if args.no_adaptive_slicing else '开启'}",
         f"- 配置：时间预算 {TIME_BUDGET}s、候选预算 {CANDIDATE_BUDGET}、"
         f"命中即停、词表 {word_count} 条、"
         f"规则 {'+'.join(Path(r).stem for r in RULE_FILES)}、"

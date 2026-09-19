@@ -88,7 +88,12 @@ def test_native_wordlist_attack_reads_dictionary_directly(client, tmp_path, monk
     entries = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
     native_entries = [entry for entry in entries if entry["attack_mode"] == "0"]
     assert native_entries, entries
-    assert any(str(dictionary) in entry["targets"] or str(dictionary) in entry["argv"] for entry in native_entries)
+    # 自适应切片把词表切成本批次的临时词表文件（内容来自这本字典，不是 Python 候选）
+    assert any(dictionary.stem in entry["argv"][-1] for entry in native_entries)
+    assert any(
+        Path(entry["argv"][-1]).read_text(encoding="utf-8").splitlines()[0] == "hunter2"
+        for entry in native_entries
+    )
     # 原生攻击不应把字典复制成临时 candidates.txt。
     assert not any("candidates.txt" in " ".join(entry["argv"]) for entry in native_entries)
 
@@ -131,8 +136,12 @@ def test_uploaded_wordlist_file_drives_native_attack(client, tmp_path, monkeypat
     assert [item["plaintext"] for item in result["recovered_items"]] == ["hunter2"]
     entries = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
     assert entries and entries[0]["attack_mode"] == "0"
-    # hashcat 收到的是上传文件的落盘路径（按需流式读取），而不是 Python 生成的候选文件。
-    assert entries[0]["argv"][-1].endswith(".dict"), entries[0]["argv"]
+    # hashcat 收到的是上传文件的落盘路径（按需读取）切出的本批次词表切片，
+    # 而不是 Python 生成的候选文件。
+    wordlist_arg = entries[0]["argv"][-1]
+    assert "wordlist-slices" in wordlist_arg, entries[0]["argv"]
+    assert ".dict" in wordlist_arg, entries[0]["argv"]
+    assert "candidates.txt" not in wordlist_arg
 
 
 def test_wordlist_file_must_be_a_text_dictionary(client, tmp_path, monkeypatch):

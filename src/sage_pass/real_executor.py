@@ -44,11 +44,14 @@ from .hashcat_adapter import (
 )
 from .interfaces import BatchOutcome, DecisionEvent
 from .keyspace import (
+    effective_wordlist_lines,
     file_line_count,
     mask_keyspace,
     masks_keyspace,
     rule_chain_count,
     select_masks_within,
+    slice_words,
+    split_mask,
 )
 from .decision.rewards import RewardWeights, RewardContext
 from .decision.research_log import ResearchRecorder, SqliteResearchLog
@@ -123,6 +126,18 @@ class _StrategyState:
     # 原生词表攻击：直接让 hashcat 读整本字典（单进程、不经过 Python 候选列表）。
     native_wordlist_path: Path | None = None
     native_pending: bool = False
+    # 自适应切片进度：原生单元被切成多个可观测批次，调度器每批之后都能重新选臂。
+    # - 词表类（S1/S7、mode 0）：已消费的词表条数 + 每个条目的放大倍数（规则链/掩码）
+    # - 掩码类（S6、mode 3）：剩余子掩码切片队列（掩码不能用 -s/-l，只能拆掩码）
+    native_total_words: int = 0
+    native_factor: int = 1
+    native_offset: int = 0
+    native_masks: tuple[str, ...] = ()
+    native_slice_keys: int = 0
+    native_last_slice_keys: int = 0
+    # 本批次请求的切片（用于按"实测条数"推进进度：hashcat 可能被时间预算截断）
+    native_requested_words: int = 0
+    native_requested_masks: tuple[str, ...] = ()
 
 
 @dataclass
@@ -184,6 +199,8 @@ class RealExecutor:
         self.session_factory = session_factory
         self.settings = settings
         self.hashcat = hashcat or HashcatAdapter(settings.hashcat_path)
+        # 实测吞吐（键/秒，含启动开销）：自适应切片用它把探针与切片规模锚定到真实速率。
+        self._rate_estimate = 0.0
         self.zip_extractor = zip_extractor or ZipHashExtractor(
             settings.zip2john_path
         )
@@ -466,6 +483,8 @@ class RealExecutor:
                     ),
                 )
             )
+        for item in strategies:
+            self._prime_native_arm(item, native_wordlist)
         expected = min(expected, task.candidate_budget)
         if expected == 0 and native_wordlist is None:
             raise AppError(
@@ -836,6 +855,7 @@ class RealExecutor:
         except AppError as exc:
             state.failed_launch = exc.message
         except Exception as exc:  # pragma: no cover - 防御未知异常
+            LOGGER.exception("真实执行出现未预期异常：run_id=%s", run_id)
             state.failed_launch = f"内部错误：{exc}"
         finally:
             if state.research is not None:
@@ -909,7 +929,7 @@ class RealExecutor:
                 self._skip_remaining(state, TaskStatus.CANCELLED, "执行已停止")
                 return
             next_batch_sizes = _next_batch_sizes(
-                state, self.settings.hashcat_stream_batch_size
+                state, self.settings.hashcat_stream_batch_size, self
             )
             prior_state = scheduler.snapshot_statistics()
             diagnostics = decision_diagnostics(scheduler, next_batch_sizes)
@@ -950,7 +970,17 @@ class RealExecutor:
             try:
                 if item.native_wordlist_path is not None:
                     # S1：原生词表攻击；带规则文件时即 hashcat 最经典的"词表 × 规则"
-                    # （-a 0 dict.txt -r best66.rule），键空间 = 词表条数 × 规则条数。
+                    # （-a 0 dict.txt -r best66.rule），键空间 = 词表条数 × 规则链倍数。
+                    # 自适应切片：按 `-s/-l` 只读本批次的词区间，批次结束后推进偏移。
+                    slice_words_count = self._native_slice_words(
+                        item, decision.candidate_limit
+                    )
+                    if slice_words_count <= 0:
+                        item.native_pending = False
+                        item.status = TaskStatus.COMPLETED.value
+                        item.finished_at = now_iso()
+                        item.message = "该单元的键空间已全部测试"
+                        continue
                     native_job = HashcatJob(
                         run_id=(
                             f"{state.run_id}-{item.strategy_id}-"
@@ -961,7 +991,11 @@ class RealExecutor:
                         timeout_seconds=decision.time_limit,
                         candidate_budget=0,
                         attack_mode=0,
-                        wordlist_path=item.native_wordlist_path,
+                        wordlist_path=self._slice_wordlist(
+                            item.native_wordlist_path,
+                            item.native_offset,
+                            item.native_offset + slice_words_count,
+                        ),
                         rule_files=_string_tuple(
                             item.parameters.get("hashcat_rule_files")
                         ),
@@ -979,7 +1013,7 @@ class RealExecutor:
                         item.message = skip_reason
                         continue
                     handle = self.hashcat.start(native_job)
-                    item.native_pending = False
+                    self._consume_native_slice(item, words=slice_words_count)
                 elif _parameter_native_arm(item):
                     native_job = _hashcat_job_for_strategy(
                         run_id=(
@@ -995,6 +1029,26 @@ class RealExecutor:
                         session_dir=self._batch_session_dir(state, item),
                     )
                     wordlist = state.native_wordlist
+                    slice_words_count = 0
+                    picked_masks: tuple[str, ...] = ()
+                    if native_job.attack_mode == 3:
+                        # 掩码切片：掩码不能用 -s/-l（基/模语义不可预测），
+                        # 只能按拆好的子掩码队列逐片执行。
+                        picked_masks = self._take_mask_slice(
+                            item, decision.candidate_limit
+                        )
+                        if not picked_masks:
+                            item.native_pending = False
+                            item.status = TaskStatus.COMPLETED.value
+                            item.finished_at = now_iso()
+                            item.message = "该单元的掩码键空间已全部测试"
+                            continue
+                        native_job = replace(
+                            native_job,
+                            masks=picked_masks,
+                            candidate_budget=0,
+                            candidate_estimate=item.candidate_budget,
+                        )
                     if native_job.attack_mode in {0, 6, 7}:
                         if wordlist is None and native_job.attack_mode in {6, 7}:
                             # 混合攻击必须有字典：没有就让出该单元，不拖垮整个运行。
@@ -1002,6 +1056,15 @@ class RealExecutor:
                             item.status = TaskStatus.COMPLETED.value
                             item.finished_at = now_iso()
                             item.message = "该原生攻击需要词表，本次未配置词表"
+                            continue
+                        slice_words_count = self._native_slice_words(
+                            item, decision.candidate_limit
+                        )
+                        if wordlist is not None and slice_words_count <= 0:
+                            item.native_pending = False
+                            item.status = TaskStatus.COMPLETED.value
+                            item.finished_at = now_iso()
+                            item.message = "该单元的键空间已全部测试"
                             continue
                         if wordlist is not None:
                             # 词表 × 规则 / 词表 × 掩码：字典直接交给 hashcat 读盘，
@@ -1015,7 +1078,11 @@ class RealExecutor:
                                 )
                             native_job = replace(
                                 native_job,
-                                wordlist_path=wordlist,
+                                wordlist_path=self._slice_wordlist(
+                                    wordlist,
+                                    item.native_offset,
+                                    item.native_offset + slice_words_count,
+                                ),
                                 candidates=(),
                                 rule_files=(
                                     rules if native_job.attack_mode == 0 else ()
@@ -1034,7 +1101,9 @@ class RealExecutor:
                         item.message = skip_reason
                         continue
                     handle = self.hashcat.start(native_job)
-                    item.native_pending = False
+                    self._consume_native_slice(
+                        item, words=slice_words_count, masks=picked_masks
+                    )
                 else:
                     candidate_job = _hashcat_job_for_strategy(
                         run_id=(
@@ -1163,6 +1232,223 @@ class RealExecutor:
             / f"{item.strategy_id}-{item.scheduled_batches}"
         )
 
+    def _prime_native_arm(
+        self, item: _StrategyState, wordlist: Path | None
+    ) -> None:
+        """初始化原生单元的自适应切片状态（词表总条数、放大倍数、掩码子切片）。
+
+        原生攻击的候选由 hashcat 自己枚举，因此"一次批次"原本就是整段键空间；
+        这里把它拆成可观测的小批次：词表类用 `-s/-l` 切词区间，掩码类拆子掩码，
+        这样调度器每批之后都能按实测产出重新选臂。
+        """
+        wordlist_path = item.native_wordlist_path
+        attack_mode = _hashcat_attack_mode(item.parameters)
+        if wordlist_path is None and _parameter_native_arm(item):
+            wordlist_path = wordlist
+        if attack_mode == 3 and _parameter_native_arm(item):
+            masks = _string_tuple(item.parameters.get("hashcat_masks"))
+            probe_target = self._probe_slice_keys(
+                masks_keyspace(masks) or 0
+            )
+            queue: list[str] = []
+            for mask in masks:
+                queue.extend(
+                    split_mask(
+                        mask,
+                        max_keys=max(1, probe_target),
+                        custom_charsets=_string_tuple(
+                            item.parameters.get("hashcat_custom_charsets")
+                        ),
+                    )
+                )
+            item.native_masks = tuple(queue)
+            item.native_pending = bool(item.native_masks)
+            return
+        if wordlist_path is None:
+            return
+        if attack_mode in {6, 7}:
+            factor = masks_keyspace(
+                _string_tuple(item.parameters.get("hashcat_hybrid_mask"))
+            )
+        else:
+            factor = rule_chain_count(
+                _string_tuple(item.parameters.get("hashcat_rule_files"))
+                or (
+                    tuple(str(path) for path in self.settings.wordlist_rule_paths)
+                    if item.native_wordlist_path is not None
+                    else ()
+                ),
+                inline_rules=_string_tuple(item.parameters.get("hashcat_inline_rules")),
+            )
+        item.native_total_words = file_line_count(wordlist_path)
+        item.native_factor = max(1, factor or 1)
+        item.native_pending = item.native_total_words > 0
+
+    def _probe_slice_keys(self, total_keys: int) -> int:
+        """首批（探针）目标键空间：按"目标 GPU 工作时长"估算，且不超过整段的 1/divisor。
+
+        探针的意义是尽早拿到"这一片有没有产出"的信号，所以它必须只占该单元时间预算的
+        一小部分；早先按"整段键空间的 1/divisor"取探针时，一次性键空间（如 3 千万）
+        就把该单元的时间预算吃光，后续"提交"批次根本没机会跑（实测命中率下降）。
+        """
+        minimum = max(1, self.settings.adaptive_min_slice_keys)
+        divisor = max(1, self.settings.adaptive_probe_divisor)
+        if self._rate_estimate > 0:
+            target = int(self._rate_estimate * max(0.1, self.settings.adaptive_probe_seconds))
+        else:
+            target = int(self.settings.adaptive_probe_keys)
+        cap = max(minimum, max(0, total_keys) // divisor)
+        return max(1, min(max(0, total_keys), max(minimum, min(target, cap))))
+
+    def _observe_native_rate(self, tested: int, duration: float) -> None:
+        """记录原生批次实测速率（键/秒，含启动开销 → 保守）。
+
+        用于把探针与后续切片的规模锚定到"这台机器 + 这个哈希"的真实吞吐，
+        而不是固定的键空间比例。
+        """
+        if tested <= 0 or duration <= 0:
+            return
+        rate = tested / duration
+        self._rate_estimate = (
+            rate if self._rate_estimate <= 0 else 0.5 * rate + 0.5 * self._rate_estimate
+        )
+
+    def _native_remaining_keys(self, item: _StrategyState) -> int:
+        """该原生单元还没测过的键空间。"""
+        if item.native_total_words > 0:
+            words_left = max(0, item.native_total_words - item.native_offset)
+            return words_left * max(1, item.native_factor)
+        if item.native_masks:
+            return masks_keyspace(item.native_masks) or 0
+        return 0
+
+    def _native_next_slice_keys(self, item: _StrategyState) -> int:
+        """本批次向调度器申请的候选量：**探针 → 提交剩余**。
+
+        hashcat 每次启动有固定的启动/规则加载开销（实测 3~7 秒），因此每个原生单元
+        最多两次启动：首批是探针（拿到"值不值得继续"的信号），被重新调度时就把剩余
+        键空间一次提交（受该单元剩余时间预算约束，hashcat 用 `--runtime` 截断，进度按
+        实测条数推进）。更细的切片用 `adaptive_growth` 控制在提交被截断之后的再切片。
+        """
+        if not self.settings.adaptive_slicing:
+            return item.candidate_budget if item.native_pending else 0
+        remaining = self._native_remaining_keys(item)
+        if remaining <= 0:
+            return 0
+        # 词表类单元的最小切片 = 一个词的放大倍数（规则链/掩码）：小于它连一条词都
+        # 塞不进切片，会退化成"跳过该单元"。
+        floor = max(
+            int(self.settings.adaptive_min_slice_keys),
+            max(1, item.native_factor) if item.native_total_words > 0 else 1,
+        )
+        if item.consumed_batches == 0:
+            return max(floor, min(remaining, self._probe_slice_keys(remaining)))
+        if item.consumed_batches == 1:
+            return remaining
+        growth = max(1.0, self.settings.adaptive_growth)
+        target = max(int(item.native_last_slice_keys * growth), floor)
+        return max(1, min(remaining, target))
+
+    def _native_slice_words(self, item: _StrategyState, limit: int) -> int:
+        """按分配到的候选量决定本片读取的词数（`-s offset -l offset+words`）。"""
+        if item.native_total_words <= 0:
+            return 0
+        return slice_words(
+            total_words=item.native_total_words,
+            offset=item.native_offset,
+            factor=max(1, item.native_factor),
+            target_keys=max(1, limit),
+        )
+
+    def _take_mask_slice(self, item: _StrategyState, limit: int) -> tuple[str, ...]:
+        """从子掩码队列里取本批次的切片（累计键空间不超过分配量，至少一片）。"""
+        picked: list[str] = []
+        used = 0
+        for mask in item.native_masks:
+            size = mask_keyspace(mask) or 0
+            if picked and used + size > max(1, limit):
+                break
+            picked.append(mask)
+            used += size
+            if not self.settings.adaptive_slicing:
+                break
+        return tuple(picked)
+
+    def _consume_native_slice(
+        self,
+        item: _StrategyState,
+        *,
+        words: int = 0,
+        masks: tuple[str, ...] = (),
+    ) -> None:
+        """记录本批次请求的切片；实际进度在拿到结果后按**实测条数**推进。
+
+        hashcat 可能被时间预算截断（`--runtime`），因此不能按请求的切片大小推进，
+        否则会跳过没测过的词/掩码。
+        """
+        if words:
+            item.native_requested_words = words
+        if masks:
+            item.native_requested_masks = masks
+
+    def _advance_native_progress(self, item: _StrategyState, tested: int) -> None:
+        """按实测条数推进切片进度（至少推进一个词/一片掩码，保证收敛）。"""
+        if item.native_requested_words:
+            factor = max(1, item.native_factor)
+            covered = max(1, int(tested) // factor)
+            words = min(item.native_requested_words, covered)
+            item.native_offset = min(item.native_total_words, item.native_offset + words)
+            item.native_last_slice_keys = words * factor
+            item.native_requested_words = 0
+        if item.native_requested_masks:
+            tested_keys = max(0, int(tested))
+            remaining = list(item.native_masks)
+            taken: list[str] = []
+            used = 0
+            for mask in item.native_requested_masks:
+                size = mask_keyspace(mask) or 0
+                # 至少推进一片（避免同一片反复重跑），其余按实测条数推进
+                if taken and used + size > tested_keys:
+                    break
+                taken.append(mask)
+                used += size
+            for mask in taken:
+                if mask in remaining:
+                    remaining.remove(mask)
+            item.native_masks = tuple(remaining)
+            item.native_last_slice_keys = used
+            item.native_requested_masks = ()
+        item.native_pending = self._native_remaining_keys(item) > 0
+
+    def _slice_wordlist(self, source: Path, offset: int, end: int) -> Path:
+        """把词表切片落成一个临时词表文件（本批次只喂这一段的词）。
+
+        为什么不用 hashcat 的 `-s/-l`：它对"多个规则文件 / 掩码文件"会直接报
+        `Use of --skip/--limit is not supported with --increment, mask files,
+        multiple dictionaries, or --stdout.`（实测 S7 词表 × 掩码会整体失败）。
+        切成独立词表文件对 hashcat 来说就是普通的单字典攻击，规则链与掩码文件都不受限，
+        而且切片键空间 = 文件行数 × 放大倍数，记账天然准确。
+        """
+        root = (
+            self.settings.upload_dir.parent
+            / "wordlist-slices"
+            / str(source.expanduser().resolve())[-24:].replace(":", "").replace("\\", "_")
+        )
+        root.mkdir(parents=True, exist_ok=True)
+        start = max(0, int(offset))
+        stop = max(start + 1, int(end))
+        target = root / f"{start}-{stop}.txt"
+        if not target.is_file():
+            lines = [
+                line.rstrip("\r\n")
+                for line in source.read_text(encoding="utf-8", errors="replace").splitlines()
+            ]
+            target.write_text(
+                "\n".join(lines[start:stop]) + "\n" if lines[start:stop] else "",
+                encoding="utf-8",
+            )
+        return target
+
     def _job_is_low_memory(self, item: _StrategyState) -> bool:
         return bool(self._low_memory_kwargs.get("optimized")) or bool(
             self._low_memory_kwargs.get("kernel_accel")
@@ -1256,6 +1542,13 @@ class RealExecutor:
             if credential.target in state.targets
         } - already_recovered
         item.time_cost += result.duration
+        # 自适应切片：按**实测条数**推进该原生单元的进度（hashcat 可能被时间预算截断，
+        # 按请求切片推进会跳过没测过的词/掩码）。
+        if item.native_requested_words or item.native_requested_masks:
+            self._advance_native_progress(item, result.tested)
+        if item.native_requested_words or item.native_requested_masks or _is_native_arm(item):
+            # 用实测吞吐校准后续切片规模（探针时长、提交规模）
+            self._observe_native_rate(result.tested or 0, result.duration)
         # 记账口径：提交量必须同时满足"实测候选数 ≤ 提交量 ≤ 该单元分配预算"。
         # - Python 候选单元：提交量 = len(candidates)（带 -r 规则时已按预算裁剪）；
         # - 原生单元（词表/掩码/混合）：没有 Python 候选列表，按 hashcat 实测值记账，
@@ -1308,7 +1601,7 @@ class RealExecutor:
             "cancelled" if state.cancel_requested or outcome.status == TaskStatus.CANCELLED else
             "execution_failed" if outcome.status == TaskStatus.FAILED else
             state.scheduler.stop_reason(_next_batch_sizes(
-                state, self.settings.hashcat_stream_batch_size
+                state, self.settings.hashcat_stream_batch_size, self
             ))
         )
         logged = state.research.complete(
@@ -1467,9 +1760,12 @@ class RealExecutor:
                     and item.strategy_id == StrategyId.S1.value
                 ):
                     item.native_wordlist_path = native_wordlist
-                    item.native_pending = item.consumed_batches == 0
-                elif _parameter_native_arm(item):
-                    item.native_pending = item.consumed_batches == 0
+                if item.native_wordlist_path is not None or _parameter_native_arm(item):
+                    # 切片进度不随快照持久化：续跑时从该单元的键空间头部重新开始，
+                    # 这样不会跳过任何候选（宁可重测，也不漏测）。
+                    item.native_offset = 0
+                    item.native_last_slice_keys = 0
+                    self._prime_native_arm(item, native_wordlist)
         with self.session_factory() as session:
             existing = StrategyRunRepository(session).list_by_run_id(run_id)
             if not existing:
@@ -2109,7 +2405,12 @@ def _fit_job_to_budget(
 
     hashcat 原生攻击（掩码 / 词表 × 规则 / 词表 × 掩码）自己枚举候选，实测条数可能
     远超计划里的候选数；调度层要求 `tested ≤ 分配预算`，因此启动前必须：
-    掩码单元裁剪掩码阶梯，词表单元用 `-l/--limit` 截断词表条数。
+    掩码单元裁剪掩码阶梯，词表单元用 `-s/-l` 截断词表条数。
+
+    注意：自适应切片下 `wordlist_skip/wordlist_limit` 已经描述本批次要读的词区间，
+    因此这里只按**区间内的词数**计算键空间，并在需要时**收紧区间末端**（而不是把
+    绝对条数改小，那样会与 skip 冲突）。
+
     返回 (可执行作业, 跳过原因)；作业为 None 表示本批次放弃该单元。
     """
     budget = max(1, int(allocation))
@@ -2128,19 +2429,41 @@ def _fit_job_to_budget(
         return replace(job, masks=tuple(kept)), ""
 
     lines = (
-        file_line_count(job.wordlist_path)
+        effective_wordlist_lines(
+            job.wordlist_path,
+            skip=job.wordlist_skip,
+            limit=job.wordlist_limit,
+        )
         if job.is_native
         else len(job.candidates)
     )
     if lines <= 0:
         return None, "词表为空，已跳过该单元"
+
+    def _trim_native(words_allowed: int) -> dict[str, int] | None:
+        """把切片区间收紧到 words_allowed 条词（保留 skip，只收末端）。
+
+        一条词是不可再分的最小单位：分配量连一条词都装不下时仍保留一条词（实测条数
+        可能略超本批次分配量，但仍在**该单元**的预算内），否则会退化成"跳过该单元"
+        ——真实故障里正是这一点让整个运行 0 命中（探针 200 万键 < 一个词的规则链
+        225 万键）。
+        """
+        start = max(0, int(job.wordlist_skip or 0))
+        current_end = (
+            int(job.wordlist_limit) if job.wordlist_limit is not None else start + lines
+        )
+        end = min(current_end, start + max(1, words_allowed))
+        if end <= start:
+            return None
+        return {"wordlist_skip": start, "wordlist_limit": end}
+
     if job.attack_mode in {6, 7}:
         factor = masks_keyspace(masks, custom_charsets=job.custom_charsets)
         if factor is None:
             return None, "无法估算混合掩码键空间，已跳过该单元"
         if lines * factor <= budget:
             return job, ""
-        # 混合攻击：先按"单个词能不能装下"挑掩码（base=1），再用 -l 截断词表条数，
+        # 混合攻击：先按"单个词能不能装下"挑掩码（base=1），再用 -s/-l 收紧词区间，
         # 这样即使整本词表 × 掩码超预算，也能跑出预算内的前缀而不是直接放弃。
         kept_masks, _ = select_masks_within(
             masks,
@@ -2154,20 +2477,15 @@ def _fit_job_to_budget(
         )
         if not kept_masks or mask_factor <= 0:
             return None, f"混合掩码键空间 {factor} 超出本批次候选预算 {budget}，已跳过该单元"
-        # 词表 × 掩码：掩码裁剪后，再按剩余预算截断词表条数（-l 限制词表条数）。
-        wordlist_limit = budget // mask_factor
-        if wordlist_limit < 1:
-            return None, f"混合掩码键空间 {mask_factor} 超出本批次候选预算 {budget}，已跳过该单元"
+        words_allowed = budget // mask_factor
+        if words_allowed < 1:
+            words_allowed = 1  # 一条词是最小不可分单位，见 _trim_native 注释
         if job.is_native:
-            return (
-                replace(
-                    job,
-                    masks=tuple(kept_masks),
-                    wordlist_limit=min(lines, wordlist_limit),
-                ),
-                "",
-            )
-        kept_candidates = job.candidates[:wordlist_limit]
+            trimmed = _trim_native(words_allowed)
+            if trimmed is None:
+                return None, "混合掩码裁剪后词区间为空，已跳过该单元"
+            return replace(job, masks=tuple(kept_masks), **trimmed), ""
+        kept_candidates = job.candidates[:words_allowed]
         if not kept_candidates:
             return None, "混合掩码裁剪后无可用候选，已跳过该单元"
         return replace(job, masks=tuple(kept_masks), candidates=kept_candidates), ""
@@ -2175,17 +2493,23 @@ def _fit_job_to_budget(
     rules = max(1, rule_chain_count(job.rule_files, inline_rules=job.inline_rules))
     if lines * rules <= budget:
         return job, ""
-    wordlist_limit = budget // rules
-    if wordlist_limit < 1:
-        return None, (
-            f"规则链放大倍数 {rules} 超出本批次候选预算 {budget}，已跳过该单元"
-        )
+    words_allowed = budget // rules
+    if words_allowed < 1:
+        words_allowed = 1  # 一条词是最小不可分单位，见 _trim_native 注释
     if job.is_native:
-        return replace(job, wordlist_limit=min(lines, wordlist_limit)), ""
-    kept_candidates = job.candidates[:wordlist_limit]
+        trimmed = _trim_native(words_allowed)
+        if trimmed is None:
+            return None, "规则链裁剪后词区间为空，已跳过该单元"
+        return replace(job, **trimmed), ""
+    kept_candidates = job.candidates[:words_allowed]
     if not kept_candidates:
         return None, "规则放大后无可用候选，已跳过该单元"
     return replace(job, candidates=tuple(kept_candidates)), ""
+
+
+def _is_native_arm(item: "_StrategyState") -> bool:
+    """自适应切片/原生记账适用的单元（原生词表或参数声明的原生攻击）。"""
+    return item.native_wordlist_path is not None or _parameter_native_arm(item)
 
 
 def _parameter_native_arm(item: "_StrategyState") -> bool:
@@ -2201,8 +2525,13 @@ def _parameter_native_arm(item: "_StrategyState") -> bool:
 def _next_batch_sizes(
     state: _RunState,
     stream_batch_size: int,
+    executor: "RealExecutor | None" = None,
 ) -> dict[str, int]:
-    """各调度单元当前可用的候选量：流式运行时问候选流，其余用物化数组。"""
+    """各调度单元当前可用的候选量：流式运行时问候选流，其余用物化数组。
+
+    原生攻击按"下一片"申请：切片让调度器每批之后都能重新选臂（自适应），
+    未开启切片或拿不到执行器时退回"一次申请整段预算"的旧行为。
+    """
     if state.candidate_stream is not None:
         sizes = dict(state.candidate_stream.next_sizes(stream_batch_size))
     else:
@@ -2214,12 +2543,16 @@ def _next_batch_sizes(
             )
             for item in state.strategies
         }
-    # 原生词表攻击覆盖该单元：它在 Python 候选流之外，单独记一次可用量。
+    # 原生攻击在该单元内：候选由 hashcat 枚举，按"下一片"申请（自适应切片）。
     for item in state.strategies:
-        if item.native_wordlist_path is not None or _parameter_native_arm(item):
-            sizes[item.strategy_id] = (
-                item.candidate_budget if item.native_pending else 0
-            )
+        if item.native_wordlist_path is None and not _parameter_native_arm(item):
+            continue
+        if not item.native_pending:
+            sizes[item.strategy_id] = 0
+        elif executor is not None:
+            sizes[item.strategy_id] = executor._native_next_slice_keys(item)
+        else:
+            sizes[item.strategy_id] = item.candidate_budget
     return sizes
 
 

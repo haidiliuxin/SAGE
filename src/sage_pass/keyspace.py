@@ -31,6 +31,22 @@ MASK_CHARSETS: dict[str, int] = {
 
 _LINE_COUNT_CACHE: dict[tuple[str, int, int], int] = {}
 
+# 可枚举的字符集内容（?b 为 0x00-0xff，不能安全地用文本表示，因此不参与拆分）。
+MASK_CHARSET_CHARS: dict[str, str] = {
+    "?l": "abcdefghijklmnopqrstuvwxyz",
+    "?u": "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    "?d": "0123456789",
+    "?h": "0123456789abcdef",
+    "?H": "0123456789ABCDEF",
+    "?s": " !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~",
+}
+MASK_CHARSET_CHARS["?a"] = (
+    MASK_CHARSET_CHARS["?l"] + MASK_CHARSET_CHARS["?u"]
+    + MASK_CHARSET_CHARS["?d"] + MASK_CHARSET_CHARS["?s"]
+)
+
+MAX_MASK_SLICES = 4096
+
 
 def is_mask_token(mask: str) -> bool:
     return mask.startswith("?")
@@ -119,6 +135,128 @@ def select_masks_within(
             used += cost
     kept.sort(key=lambda mask: order[mask])
     return kept, used
+
+
+def _mask_tokens(
+    mask: str,
+    custom_charsets: Sequence[str] = (),
+) -> list[tuple[int, int, str | None]]:
+    """掩码里的占位符：[(起始下标, 长度, 字符集内容)]。
+
+    字符集内容为 None 表示无法枚举（未知占位符、`?b`、或未提供的 `?1..?4`），
+    此时该占位符不能用来拆掩码。
+    """
+    tokens: list[tuple[int, int, str | None]] = []
+    index = 0
+    while index < len(mask):
+        if mask[index] == "?" and index + 1 < len(mask):
+            token = mask[index : index + 2]
+            if token != "??":
+                if token in MASK_CHARSET_CHARS:
+                    chars: str | None = MASK_CHARSET_CHARS[token]
+                elif token[1] in "1234":
+                    position = int(token[1]) - 1
+                    chars = (
+                        "".join(dict.fromkeys(str(custom_charsets[position])))
+                        if position < len(custom_charsets)
+                        else None
+                    )
+                else:
+                    chars = None
+                tokens.append((index, 2, chars))
+                index += 2
+                continue
+            index += 2
+            continue
+        index += 1
+    return tokens
+
+
+def split_mask(
+    mask: str,
+    *,
+    max_keys: int,
+    custom_charsets: Sequence[str] = (),
+    max_slices: int = MAX_MASK_SLICES,
+) -> list[str]:
+    """把掩码拆成若干子掩码，使每个子掩码的键空间尽量不超过 `max_keys`。
+
+    hashcat 的 `-s/-l` 对掩码是 base/mod 语义（实测 `?d?d?d?d -s 0 -l 100` 连第一个
+    候选都没测到），因此掩码切片只能靠"固定首个可拆占位符"：`?d?d?d?d` →
+    `0?d?d?d`、`1?d?d?d` …，每个子掩码的键空间精确可预测，需要时递归拆分。
+
+    无法拆分时（没有占位符、占位符字符集为 1、或占位符未提供自定义字符集）原样返回；
+    切片数超过 `max_slices` 时停止拆分（保留更大但完整的切片，绝不丢键空间）。
+    """
+    text = mask.strip()
+    keyspace = mask_keyspace(mask, custom_charsets=custom_charsets)
+    if keyspace is None or keyspace <= max_keys:
+        return [text] if text else []
+
+    current = [text]
+    for _ in range(8):  # 掩码最长为 256 位，实际不会超过这个层数
+        bigger = [
+            item
+            for item in current
+            if (mask_keyspace(item, custom_charsets=custom_charsets) or 0) > max_keys
+        ]
+        if not bigger:
+            break
+        expanded: list[str] = []
+        changed = False
+        for item in current:
+            size = mask_keyspace(item, custom_charsets=custom_charsets) or 0
+            split_done = False
+            if size > max_keys:
+                for index, length, chars in _mask_tokens(item, custom_charsets):
+                    if not chars or len(set(chars)) < 2:
+                        continue
+                    expanded.extend(
+                        item[:index] + char + item[index + length :]
+                        for char in dict.fromkeys(chars)
+                    )
+                    split_done = True
+                    changed = True
+                    break
+            if not split_done:
+                expanded.append(item)
+        if not changed or len(expanded) > max_slices:
+            break
+        current = expanded
+    return current
+
+
+def slice_words(
+    *,
+    total_words: int,
+    offset: int,
+    factor: int,
+    target_keys: int,
+) -> int:
+    """`-a 0/6/7` 切片：返回本片读取的词数（`-s offset -l offset+word_count`）。
+
+    至少返回 1（除非词表已用尽），否则调度器会在同一个偏移上原地打转。
+    """
+    remaining = max(0, total_words - max(0, offset))
+    if remaining == 0:
+        return 0
+    per_word = max(1, factor)
+    words = max(1, int(target_keys) // per_word)
+    return max(1, min(remaining, words))
+
+
+def effective_wordlist_lines(
+    path: str | Path,
+    *,
+    skip: int | None = 0,
+    limit: int | None = None,
+) -> int:
+    """切片后实际读取的词表条数（hashcat `-s` 跳过、`-l` 为绝对条数）。"""
+    total = file_line_count(path)
+    start = max(0, int(skip or 0))
+    if limit is None:
+        return max(0, total - start)
+    return max(0, min(total, int(limit)) - start)
 
 
 def file_line_count(path: str | Path) -> int:
