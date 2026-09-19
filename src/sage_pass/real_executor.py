@@ -980,6 +980,7 @@ class RealExecutor:
                         item.status = TaskStatus.COMPLETED.value
                         item.finished_at = now_iso()
                         item.message = "该单元的键空间已全部测试"
+                        self._skip_pending_batch(state, item, item.message)
                         continue
                     native_job = HashcatJob(
                         run_id=(
@@ -1011,6 +1012,7 @@ class RealExecutor:
                         item.status = TaskStatus.COMPLETED.value
                         item.finished_at = now_iso()
                         item.message = skip_reason
+                        self._skip_pending_batch(state, item, skip_reason)
                         continue
                     handle = self.hashcat.start(native_job)
                     self._consume_native_slice(item, words=slice_words_count)
@@ -1042,6 +1044,7 @@ class RealExecutor:
                             item.status = TaskStatus.COMPLETED.value
                             item.finished_at = now_iso()
                             item.message = "该单元的掩码键空间已全部测试"
+                            self._skip_pending_batch(state, item, item.message)
                             continue
                         native_job = replace(
                             native_job,
@@ -1056,6 +1059,7 @@ class RealExecutor:
                             item.status = TaskStatus.COMPLETED.value
                             item.finished_at = now_iso()
                             item.message = "该原生攻击需要词表，本次未配置词表"
+                            self._skip_pending_batch(state, item, item.message)
                             continue
                         slice_words_count = self._native_slice_words(
                             item, decision.candidate_limit
@@ -1065,6 +1069,7 @@ class RealExecutor:
                             item.status = TaskStatus.COMPLETED.value
                             item.finished_at = now_iso()
                             item.message = "该单元的键空间已全部测试"
+                            self._skip_pending_batch(state, item, item.message)
                             continue
                         if wordlist is not None:
                             # 词表 × 规则 / 词表 × 掩码：字典直接交给 hashcat 读盘，
@@ -1099,6 +1104,7 @@ class RealExecutor:
                         item.status = TaskStatus.COMPLETED.value
                         item.finished_at = now_iso()
                         item.message = skip_reason
+                        self._skip_pending_batch(state, item, skip_reason)
                         continue
                     handle = self.hashcat.start(native_job)
                     self._consume_native_slice(
@@ -1128,6 +1134,7 @@ class RealExecutor:
                         item.status = TaskStatus.COMPLETED.value
                         item.finished_at = now_iso()
                         item.message = skip_reason
+                        self._skip_pending_batch(state, item, skip_reason)
                         continue
                     handle = self.hashcat.start(candidate_job)
             except AppError as exc:
@@ -1350,8 +1357,16 @@ class RealExecutor:
         return max(1, min(remaining, target))
 
     def _native_slice_words(self, item: _StrategyState, limit: int) -> int:
-        """按分配到的候选量决定本片读取的词数（`-s offset -l offset+words`）。"""
+        """按分配到的候选量决定本片读取的词数（`-s offset -l offset+words`）。
+
+        一条词是不可再分的最小单位（规则链/掩码按整条词放大）：当本批次分配量连一条词
+        都装不下时返回 0，让该单元优雅收尾——否则实测条数会超出该单元的候选预算，
+        触发 `observation exceeds arm candidate budget` 并中断整个运行（真实故障：
+        S1 预算用尽后调度器只给了 30 个候选，而一条词是 66 条）。
+        """
         if item.native_total_words <= 0:
+            return 0
+        if int(limit) < max(1, item.native_factor):
             return 0
         return slice_words(
             total_words=item.native_total_words,
@@ -1462,53 +1477,70 @@ class RealExecutor:
         candidates: tuple[str, ...],
         decision: Any,
     ) -> HashcatJob:
-        """按降级参数重建作业（掩码/词表攻击从计划参数重建，其余用候选重建）。"""
+        """按降级参数重建**本批次同一片**的作业（低内存重试不改变切片范围）。
+
+        注意：原生词表作业必须继续用"切片词表文件"，不能退回 hashcat 的 `-s/-l`
+        ——`-l` 与掩码文件同时使用会被 hashcat 直接拒绝
+        （`Use of --skip/--limit is not supported with ... mask files ...`），
+        真实故障：ZIP 目标下 S7 内存不足触发降级重试，重试作业带了 `-l` + 掩码文件，
+        整轮运行因此失败。
+        """
         run_id = f"{state.run_id}-{item.strategy_id}-{item.scheduled_batches}"
-        if item.native_wordlist_path is not None:
-            job = HashcatJob(
+        attack_mode = _hashcat_attack_mode(item.parameters)
+        custom_charsets = _string_tuple(item.parameters.get("hashcat_custom_charsets"))
+        if _parameter_native_arm(item) and attack_mode == 3:
+            masks = item.native_requested_masks or item.native_masks
+            return HashcatJob(
                 run_id=run_id,
                 target_hashes=state.targets,
                 hash_mode=state.hash_mode,
                 timeout_seconds=decision.time_limit,
                 candidate_budget=0,
-                attack_mode=0,
-                wordlist_path=item.native_wordlist_path,
-                rule_files=_string_tuple(item.parameters.get("hashcat_rule_files")),
+                attack_mode=3,
+                masks=tuple(masks),
+                custom_charsets=custom_charsets,
                 candidate_estimate=item.candidate_budget,
                 **self._memory_fallback_kwargs,
             )
-            fitted, _ = _fit_job_to_budget(job, allocation=decision.candidate_limit)
-            return fitted if fitted is not None else job
-        if _parameter_native_arm(item):
-            job = _hashcat_job_for_strategy(
+
+        source: Path | None = None
+        if item.native_wordlist_path is not None:
+            source = item.native_wordlist_path
+        elif _parameter_native_arm(item) and attack_mode in {0, 6, 7}:
+            source = state.native_wordlist
+        if source is not None and attack_mode in {0, 6, 7}:
+            words = item.native_requested_words or self._native_slice_words(
+                item, decision.candidate_limit
+            )
+            words = max(1, words)
+            rules = (
+                _string_tuple(item.parameters.get("hashcat_rule_files"))
+                if attack_mode == 0
+                else ()
+            )
+            if attack_mode == 0 and not rules and item.native_wordlist_path is not None:
+                rules = tuple(str(path) for path in self.settings.wordlist_rule_paths)
+            return HashcatJob(
                 run_id=run_id,
                 target_hashes=state.targets,
                 hash_mode=state.hash_mode,
-                candidates=(),
                 timeout_seconds=decision.time_limit,
-                candidate_budget=item.candidate_budget,
-                parameters=item.parameters,
-                session_dir=None,
+                candidate_budget=0,
+                attack_mode=attack_mode,
+                wordlist_path=self._slice_wordlist(
+                    source, item.native_offset, item.native_offset + words
+                ),
+                rule_files=rules,
+                masks=(
+                    _native_masks(item.parameters, (), attack_mode)
+                    if attack_mode in {6, 7}
+                    else ()
+                ),
+                custom_charsets=custom_charsets,
+                candidate_estimate=item.candidate_budget,
+                **self._memory_fallback_kwargs,
             )
-            if (
-                state.native_wordlist is not None
-                and job.attack_mode in {0, 6, 7}
-            ):
-                job = replace(
-                    job,
-                    wordlist_path=state.native_wordlist,
-                    candidates=(),
-                    rule_files=(
-                        job.rule_files
-                        if job.attack_mode == 0
-                        else ()
-                    ),
-                    candidate_budget=0,
-                    candidate_estimate=item.candidate_budget,
-                )
-            job = replace(job, **self._memory_fallback_kwargs)
-            fitted, _ = _fit_job_to_budget(job, allocation=decision.candidate_limit)
-            return fitted if fitted is not None else job
+
         del result
         job = HashcatJob(
             run_id=run_id,
@@ -1583,6 +1615,45 @@ class RealExecutor:
                 tested=outcome.tested, recovered=recovered, duration=outcome.duration,
             )
         return outcome
+
+    def _skip_pending_batch(
+        self, state: _RunState, item: _StrategyState, reason: str
+    ) -> None:
+        """在已 `research.begin()` 之后放弃该批次：补一个零批次完成事件。
+
+        研究日志要求 begin / complete 严格配对；启动前的各种"跳过该单元"分支
+        （缺词表、键空间已测完、预算不足一条词…）如果直接 `continue`，下一次 begin
+        会抛 `recorder requires an unfinished run with no pending batch` 并中断整个运行。
+        零批次不消耗预算、不计入 tested，只是把这次决策正常收尾。
+        """
+        if state.research is None:
+            return
+        outcome = BatchOutcome(
+            run_id=state.run_id,
+            arm_id=item.strategy_id,
+            strategy_id=item.strategy_id,
+            batch_index=item.scheduled_batches,
+            candidate_count=0,
+            tested=0,
+            recovered=0,
+            duration=0.0,
+            status=TaskStatus.COMPLETED,
+            exit_code=None,
+            message=reason,
+        )
+        try:
+            state.research.complete(
+                outcome,
+                updated_state=state.scheduler.snapshot_statistics(),
+                stop_reason=state.scheduler.stop_reason(
+                    _next_batch_sizes(
+                        state, self.settings.hashcat_stream_batch_size, self
+                    )
+                ),
+            )
+            state.research_previous_arm = item.strategy_id
+        except Exception:  # pragma: no cover - 日志补记失败不影响执行
+            LOGGER.warning("研究日志补记跳过批次失败：%s", reason)
 
     def _record_decision_event(
         self,

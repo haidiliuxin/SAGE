@@ -75,6 +75,16 @@ total = len(candidates)
 if slow:
     time.sleep(slow)
 
+# 模拟 hashcat 因主机/显存不足失败（用于验证低内存降级重试路径）。
+# 用文件做"只失败一次"的标记：第一次调用失败，之后正常，便于验证重试作业本身可用。
+_mem_marker = os.environ.get("FAKE_HASHCAT_MEMORY_FAIL_ONCE", "")
+if _mem_marker and not os.path.exists(_mem_marker):
+    open(_mem_marker, "w", encoding="utf-8").close()
+    sys.stderr.write(
+        "* Device #1: Not enough allocatable device memory or free host memory for mapping.\n"
+    )
+    sys.exit(1)
+
 # 模拟"被时间预算截断"：只测到 FAKE_HASHCAT_TESTED_CAP 条候选（用于验证切片进度
 # 按**实测**条数推进，而不是按请求的切片大小推进）。
 cap = os.environ.get("FAKE_HASHCAT_TESTED_CAP", "")

@@ -322,6 +322,99 @@ def test_probe_never_smaller_than_one_word(client, tmp_path, monkeypatch):
     assert all(entry["candidate_count"] >= 1 for entry in launches), launches
 
 
+def test_slice_words_is_zero_when_allocation_smaller_than_one_word(client, tmp_path):
+    """分配量小于"一条词的放大倍数"时不再硬塞一条词，而是让该单元收尾。
+
+    真实故障：S1 预算用尽后调度器只给 30 个候选，而一条词 = 66 条 → 实测 66 > 分配 30
+    → 调度器报 `observation exceeds arm candidate budget`，**整轮运行失败**。
+    """
+    from sage_pass.real_executor import _StrategyState
+
+    executor = client.app.state.real_executor
+    item = _StrategyState(
+        strategy_id="S1",
+        strategy_name="Baseline",
+        priority=1,
+        time_budget=10,
+        candidate_budget=66,
+        parameters={},
+        native_factor=66,
+        native_total_words=81,
+        native_offset=80,
+    )
+    assert executor._native_slice_words(item, 66) == 1  # 刚好够一条词
+    assert executor._native_slice_words(item, 30) == 0  # 不够一条词 → 收尾
+    assert executor._native_slice_words(item, 0) == 0
+
+
+def test_native_arm_ends_gracefully_when_budget_exhausted(client, tmp_path, monkeypatch):
+    """预算耗尽时该单元优雅收尾：运行完成，不会因记账越界而中断。"""
+    log_path = tmp_path / "exhausted.jsonl"
+    _install_fakes(client, tmp_path, monkeypatch, log_path, FAKE_HASHCAT_NO_RECOVER="1")
+
+    wordlist = tmp_path / "dict.txt"
+    wordlist.write_text("\n".join(f"word{i}" for i in range(8)) + "\n", encoding="utf-8")
+    rules = tmp_path / "ten.rule"
+    rules.write_text("\n".join(f"${digit}" for digit in "0123456789") + "\n", encoding="utf-8")
+    # 每词 10 条规则 → 该单元键空间 80；候选预算给 95（不足以整数倍覆盖，逼出"剩余 < 一条词"）
+    _configure(
+        client,
+        wordlist=wordlist,
+        rules=rules,
+        adaptive_min_slice_keys=1,
+        adaptive_probe_keys=10,
+        adaptive_probe_divisor=8,
+    )
+    run_id = _start_run(client, candidate_budget=95)
+    status = _wait_terminal(client, run_id)
+
+    assert status["status"] == "completed", status
+    launches = [
+        entry for entry in _entries(log_path) if entry["attack_mode"] == "0" and entry["rules"]
+    ]
+    assert launches, "该单元至少应跑一批"
+
+
+def test_low_memory_retry_keeps_wordlist_slice_and_mask_file(client, tmp_path, monkeypatch):
+    """低内存降级重试不得退回 hashcat 的 -s/-l（与掩码文件冲突）。
+
+    真实故障：ZIP 目标下 S7 内存不足触发降级重试，重试作业带了 `-l` + 掩码文件，
+    运行以 `Hashcat 的 -s/-l 不能与掩码文件同时使用` 失败。
+    """
+    log_path = tmp_path / "retry.jsonl"
+    marker = tmp_path / "mem-once"
+    _install_fakes(
+        client,
+        tmp_path,
+        monkeypatch,
+        log_path,
+        FAKE_HASHCAT_NO_RECOVER="1",
+        FAKE_HASHCAT_MEMORY_FAIL_ONCE=str(marker),
+    )
+
+    wordlist = tmp_path / "dict.txt"
+    wordlist.write_text("\n".join(f"word{i}" for i in range(6)) + "\n", encoding="utf-8")
+    rules = tmp_path / "one.rule"
+    rules.write_text(":\n", encoding="utf-8")
+    _configure(
+        client,
+        wordlist=wordlist,
+        rules=rules,
+        mask_ladder=("?d?d",),
+        hybrid_masks=("?d", "?l"),
+        adaptive_min_slice_keys=1,
+        adaptive_probe_keys=100,
+    )
+
+    run_id = _start_run(client, candidate_budget=50_000)
+    status = _wait_terminal(client, run_id)
+
+    assert marker.is_file(), "应触发过一次内存失败（否则本用例没覆盖重试路径）"
+    assert status["status"] == "completed", status
+    for entry in _entries(log_path):
+        assert "-s" not in entry["argv"] and "-l" not in entry["argv"], entry["argv"]
+
+
 def test_adaptive_slicing_disabled_keeps_single_batch(client, tmp_path, monkeypatch):
     """关闭开关时退回"一次跑完"的旧行为，保证可回退。"""
     log_path = tmp_path / "single.jsonl"
