@@ -1,4 +1,8 @@
-"""生成《100 条口令评测：用例清单与复现方式》文档（把评测用例交给队友复测）。"""
+"""生成《100 条口令评测：用例清单与复现方式》文档（把评测用例交给队友复测）。
+
+同时把本机已有评测结果（归档 CSV）标注到每条用例上，便于队友区分
+"本机命中 / 本机未命中（以及是哪个配置下未命中）"。
+"""
 
 from __future__ import annotations
 
@@ -11,6 +15,22 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
+# 归档结果：标签 → (CSV 文件名, 覆盖范围描述)
+ARCHIVED_RUNS = {
+    "100": (
+        "benchmark-100-20260919-0316.csv",
+        "完整 100 条（固定顺序 + 不切片，时间预算 60s）",
+    ),
+    "adaptive30": (
+        "benchmark-100-20260919-1042-adaptive.csv",
+        "前 30 条（bandit + 自适应切片，时间预算 120s）",
+    ),
+    "baseline30": (
+        "benchmark-100-20260919-1049-fixed-noslice.csv",
+        "前 30 条（固定顺序 + 不切片，时间预算 120s）",
+    ),
+}
+
 
 def load_benchmark_module():
     spec = importlib.util.spec_from_file_location(
@@ -21,11 +41,66 @@ def load_benchmark_module():
     return module
 
 
+def load_results() -> dict[str, dict[str, dict]]:
+    """读取归档 CSV：{标签: {用例 id: 结果行}}。"""
+    results: dict[str, dict[str, dict]] = {}
+    for label, (filename, _) in ARCHIVED_RUNS.items():
+        path = REPO_ROOT / "docs" / "experiments" / filename
+        if not path.is_file():
+            continue
+        results[label] = {
+            row["id"]: row
+            for row in csv.DictReader(path.open(encoding="utf-8-sig"))
+        }
+    return results
+
+
+def mark(row: dict | None) -> str:
+    if row is None:
+        return "—"
+    status = row.get("run_status") or ""
+    if status == "failed":
+        return "⚠ 运行失败"
+    if row.get("recovered") == "True":
+        strategy = row.get("hit_strategy") or "?"
+        return f"✅ {strategy}"
+    return "❌ 未命中"
+
+
+def summary_table(results: dict[str, dict[str, dict]], cases: list[dict]) -> str:
+    categories = list(dict.fromkeys(case["category"] for case in cases))
+    lines = [
+        "| 类别 | " + " | ".join(ARCHIVED_RUNS[label][1] for label in ARCHIVED_RUNS) + " |",
+        "| --- | " + " | ".join("---" for _ in ARCHIVED_RUNS) + " |",
+    ]
+    for category in categories:
+        cells = []
+        for label in ARCHIVED_RUNS:
+            rows = results.get(label, {})
+            ids = [case["id"] for case in cases if case["category"] == category]
+            hit = sum(1 for case_id in ids if rows.get(case_id, {}).get("recovered") == "True")
+            total = sum(1 for case_id in ids if case_id in rows)
+            cells.append(f"{hit}/{total}" if total else "—")
+        lines.append(f"| {category} | " + " | ".join(cells) + " |")
+    totals = []
+    for label in ARCHIVED_RUNS:
+        rows = results.get(label, {})
+        hit = sum(1 for row in rows.values() if row.get("recovered") == "True")
+        totals.append(f"**{hit}/{len(rows)}**" if rows else "—")
+    lines.append("| **合计** | " + " | ".join(totals) + " |")
+    return "\n".join(lines)
+
+
 def main() -> int:
     module = load_benchmark_module()
     cases = module.corpus()
+    results = load_results()
+
     rows = []
     for case in cases:
+        marks = []
+        for label in ARCHIVED_RUNS:
+            marks.append(mark(results.get(label, {}).get(case["id"])))
         extra = "—"
         if case.get("context"):
             extra = "PII（见下方）"
@@ -33,20 +108,58 @@ def main() -> int:
             extra = "历史口令：" + "、".join(case["historical_passwords"])
         rows.append(
             f"| {case['id']} | {case['category']} | `{case['password']}` | "
-            f"`{case['md5']}` | {extra} |"
+            + " | ".join(marks)
+            + f" | {extra} |"
         )
+
+    missed_100 = [
+        case
+        for case in cases
+        if results.get("100", {}).get(case["id"], {}).get("recovered") != "True"
+        and case["id"] in results.get("100", {})
+    ]
+    missed_lines = [
+        "| ID | 类别 | 口令 | 本机未命中原因 |",
+        "| --- | --- | --- | --- |",
+    ]
+    for case in missed_100:
+        row = results["100"][case["id"]]
+        reason = row.get("reason") or ""
+        if case["category"].startswith("hard"):
+            short = "设计上的不可达样本（高熵对照）"
+        elif reason.startswith("候选空间已覆盖"):
+            short = "候选空间已覆盖但未命中（预算/调度问题）"
+        elif "原生单元已实测" in reason:
+            short = "Python 候选空间未覆盖；原生单元（词表 × 规则链 / 掩码 / 混合）已实测仍未命中"
+        else:
+            short = reason or "—"
+        missed_lines.append(
+            f"| {case['id']} | {case['category']} | `{case['password']}` | {short} |"
+        )
+
     pii = json.dumps(module.PII, ensure_ascii=False, indent=2, sort_keys=True)
     rules = "\n".join(f"- `{Path(path).name}`" for path in module.RULE_FILES)
     doc = f"""# 100 条口令评测：用例清单与复现方式（交给队友复测）
 
 > 这份评测回答两个问题：**系统能解出多少"不那么常见"的口令**、**命中是否只来自基线单元（S1）**。
 > 语料与词表都由 `scripts/benchmark_100.py` 内置生成（确定性、可复现），不需要额外准备数据。
+>
+> 下表已标注**本机实测结果**：✅ 命中（含命中策略）、❌ 未命中、⚠ 运行失败。
+> 机读版本（带同样标注）：`docs/experiments/benchmark-cases-100.csv`。
 
-## 一、怎么跑（最短路径）
+## 一、本机结果总览
+
+{summary_table(results, cases)}
+
+三个配置分别是：
+
+{chr(10).join(f"{index + 1}. **{description}** — `docs/experiments/{ARCHIVED_RUNS[label][0]}`" for index, (label, (_, description)) in enumerate(ARCHIVED_RUNS.items()))}
+
+## 二、怎么跑（最短路径）
 
 ```powershell
 git fetch origin
-git checkout feat/adaptive-native-slicing        # 自适应切片分支；基线行为在 main 上也有
+git checkout feat/adaptive-native-slicing        # 自适应切片分支；旧行为在 main 上
 python -m venv .venv; .\\.venv\\Scripts\\pip install -r requirements.txt
 $env:PYTHONPATH='src'
 
@@ -81,7 +194,7 @@ $env:PYTHONIOENCODING='utf-8'
 掩码阶梯 `?d?d?d?d,?l?l?l?l,?l?l?l?l?d?d`、混合掩码 `?d?d?d?d,?d?d,!`、
 planner=`rule`、`SAGE_SEED_WORDLISTS=data/wordlists/zh-base.txt`。
 
-## 二、用例清单（100 条，10 类各 10 条）
+## 三、用例清单（100 条，10 类各 10 条）
 
 | 类别 | 条数 | 设计意图 |
 | --- | --- | --- |
@@ -97,7 +210,7 @@ planner=`rule`、`SAGE_SEED_WORDLISTS=data/wordlists/zh-base.txt`。
 | hard（对照） | 10 | 高熵随机口令，**预期全部不可达**，用于确认评测没有"作弊" |
 
 机读版本：`docs/experiments/benchmark-cases-100.csv`
-（列：id / category / password / md5 / context / historical_passwords）。
+（列：id / category / password / md5 / context / historical_passwords / 各配置结果）。
 
 评测里的 PII（`pii` 与部分 `cn+mixed` 用例共用）：
 
@@ -105,39 +218,21 @@ planner=`rule`、`SAGE_SEED_WORDLISTS=data/wordlists/zh-base.txt`。
 {pii}
 ```
 
-### 明细
+### 明细（含本机结果）
 
-| ID | 类别 | 口令 | MD5 | 附带信息 |
-| --- | --- | --- | --- | --- |
+| ID | 类别 | 口令 | {" | ".join(ARCHIVED_RUNS[label][1] for label in ARCHIVED_RUNS)} | 附带信息 |
+| --- | --- | --- | {" | ".join("---" for _ in ARCHIVED_RUNS)} | --- |
 {chr(10).join(rows)}
 
-## 三、预期结果（本机实测，可用于对照）
+## 四、本机未命中的 35 条（完整 100 条口径）
 
-### 30 条快速口径（C001–C030：dict+num / dict+symbol / pinyin+num）
+{chr(10).join(missed_lines)}
 
-| 指标 | 自适应（bandit + 切片） | 基线（固定顺序 + 不切片） |
-| --- | --- | --- |
-| 命中 | 25/30 | 25/30 |
-| 命中来源策略 | S1 12、S7 5、S5 4、S3 3、S2 1（**S1 占 48%**） | S1 23、S2 1、S3 1（**S1 占 92%**） |
-| 平均耗时 | 32.3s | 14.3s |
-| 决策数（探索/利用） | 233（207/26） | 139（46/93） |
-| 归档 | `docs/experiments/benchmark-100-20260919-1042-adaptive.*` | `docs/experiments/benchmark-100-20260919-1049-fixed-noslice.*` |
+其中 `hard(对照)` 的 10 条是**设计上的不可达样本**，可用于检查评测是否"作弊"；
+其余未命中是下一步优化项，见 `docs/experiments/benchmark-100-findings.md` 的
+"下一轮优化清单"（leet 叠加规则、历史口令结构变换、词表补键盘序列、组合攻击、结构模板）。
 
-### 完整 100 条（main 上的 `79e0cbd`，规则链 best66 × d3ad0ne，时间预算 60s）
-
-| 类别 | 命中 | 类别 | 命中 |
-| --- | --- | --- | --- |
-| dict+num | 10/10 | keyboard | 7/10 |
-| pinyin+num | 10/10 | phrase | 7/10 |
-| pii | 10/10 | cn+mixed | 6/10 |
-| reuse | 9/10 | dict+symbol | 5/10 |
-| | | leet | 1/10 |
-| | | hard（对照） | 0/10 ✅ |
-
-合计 **65/100**，命中来源 S1 51、S4 10、S2/S3/S5/S7 各 1~2；
-归档：`docs/experiments/benchmark-100-20260919-0316.*`。
-
-## 四、结果怎么读（复测时请按同一口径）
+## 五、结果怎么读（复测时请按同一口径）
 
 每个用例一行，关键列：
 
@@ -150,7 +245,7 @@ planner=`rule`、`SAGE_SEED_WORDLISTS=data/wordlists/zh-base.txt`。
 - `reason`：未命中归因（Python 候选空间未覆盖 / 原生单元已实测仍未命中）；
 - `run_status` / `run_message`：运行状态与 hashcat 失败原因（排查用）。
 
-## 五、已知差异点（复测时容易踩）
+## 六、已知差异点（复测时容易踩）
 
 1. **hashcat 的多个 `-r` 是规则链（乘积）**，不是并集：`best66 × d3ad0ne` 每个词
    225 万条规则，81 词 ≈ 1.8 亿键；规则表吃主机内存，三份以上大规则文件会失败。
@@ -162,7 +257,36 @@ planner=`rule`、`SAGE_SEED_WORDLISTS=data/wordlists/zh-base.txt`。
 """
     target = REPO_ROOT / "docs" / "handoff" / "benchmark-cases.md"
     target.write_text(doc, encoding="utf-8")
-    print("写出", target, len(cases), "条用例")
+
+    # 机读版本：把三个配置的结果并到用例 CSV 里
+    csv_path = REPO_ROOT / "docs" / "experiments" / "benchmark-cases-100.csv"
+    fields = [
+        "id", "category", "password", "md5", "context", "historical_passwords",
+        "local_hit_100", "local_strategy_100", "local_hit_30_adaptive",
+        "local_hit_30_baseline",
+    ]
+    with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for case in cases:
+            row100 = results.get("100", {}).get(case["id"], {})
+            row_ad = results.get("adaptive30", {}).get(case["id"], {})
+            row_bl = results.get("baseline30", {}).get(case["id"], {})
+            writer.writerow({
+                "id": case["id"],
+                "category": case["category"],
+                "password": case["password"],
+                "md5": case["md5"],
+                "context": json.dumps(case.get("context", {}), ensure_ascii=False, sort_keys=True),
+                "historical_passwords": "|".join(case.get("historical_passwords", [])),
+                "local_hit_100": row100.get("recovered", ""),
+                "local_strategy_100": row100.get("hit_strategy", ""),
+                "local_hit_30_adaptive": row_ad.get("recovered", ""),
+                "local_hit_30_baseline": row_bl.get("recovered", ""),
+            })
+    print("写出", target)
+    print("写出", csv_path)
+    print("本机 100 条口径命中:", sum(1 for row in results.get("100", {}).values() if row.get("recovered") == "True"))
     return 0
 
 
