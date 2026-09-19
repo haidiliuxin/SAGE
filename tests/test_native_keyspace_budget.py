@@ -103,6 +103,51 @@ def test_planner_sizes_s1_budget_by_wordlist_times_rules(tmp_path):
     assert by_id["S6"].candidate_budget >= 10_000
 
 
+def test_budget_squeeze_keeps_cheap_high_value_hybrid_year_mask(tmp_path):
+    """预算不够时先砍"纯掩码"里最贵的，而不是砍"词 + 年份"这类高价值混合掩码。
+
+    真实故障：任务候选预算 100 万时，计划层先把 S7 的 `?d?d?d?d`（词 + 4 位年份）裁掉，
+    留下 S6 的 `?l?l?l?l`（随机字母，几乎无实战价值），导致 `summer2023` 这类口令
+    在候选空间里根本不存在。
+    """
+    wordlist = tmp_path / "dict.txt"
+    wordlist.write_text("\n".join(f"word{index}" for index in range(81)) + "\n", encoding="utf-8")
+
+    plan = RulePlanner(
+        native_attacks=NativeAttackSettings(
+            wordlist_path=str(wordlist),
+            mask_ladder=("?d?d?d?d", "?l?l?l?l", "?l?l?l?l?d?d"),
+            hybrid_masks=("?d?d?d?d", "?d?d", "!"),
+        )
+    ).plan(_prir(candidate_budget=1_000_000))
+    by_id = {item.strategy_id.value: item for item in plan.strategies}
+
+    assert by_id["S7"].parameters["hashcat_hybrid_mask"] == ["?d?d?d?d", "?d?d", "!"]
+    # 被牺牲的是纯掩码单元里最贵的那个（?l?l?l?l = 456976）
+    assert "?l?l?l?l" not in by_id["S6"].parameters["hashcat_masks"]
+    # 裁剪必须留下可执行的提示（说明需要的预算）
+    assert any("候选预算" in warning for warning in plan.warnings), plan.warnings
+
+
+def test_warning_states_required_budget_when_native_trimmed(tmp_path):
+    """裁剪警告必须写清"需要多少候选预算"，否则用户无法判断该调多大。"""
+    wordlist = tmp_path / "dict.txt"
+    wordlist.write_text("\n".join(f"word{index}" for index in range(81)) + "\n", encoding="utf-8")
+    rules = tmp_path / "two.rule"
+    rules.write_text("$1\n$2\n", encoding="utf-8")  # 每词 2 条规则 → 键空间 162
+
+    plan = RulePlanner(
+        native_attacks=NativeAttackSettings(
+            rule_paths=(str(rules),),
+            wordlist_path=str(wordlist),
+        )
+    ).plan(_prir(candidate_budget=100))
+    warnings = " ".join(plan.warnings)
+
+    assert "162" in warnings, plan.warnings
+    assert "候选预算" in warnings, plan.warnings
+
+
 def test_planner_trims_hybrid_masks_that_do_not_fit(tmp_path):
     wordlist = tmp_path / "dict.txt"
     wordlist.write_text("alpha\nbeta\n", encoding="utf-8")

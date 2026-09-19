@@ -750,7 +750,9 @@ def _fit_native_units(
             )
             warnings.append(
                 "S1 规则链超出候选预算，已缩短为："
-                f"{' × '.join(chosen) if chosen else '（无规则，纯词表）'}"
+                f"{' × '.join(chosen) if chosen else '（无规则，纯词表）'}；"
+                f"完整规则链键空间 {native.s1_keyspace:,}，"
+                f"如需完整覆盖请把任务候选预算提高到 ≥ {native.s1_keyspace:,}"
             )
 
     def _mask_total(masks: tuple[str, ...]) -> int | None:
@@ -793,6 +795,55 @@ def _fit_native_units(
             overrides[strategy_id] = masks
 
     native_total = sum(keyspace for _, keyspace, _, _ in present)
+    if native_total > candidate_limit:
+        # 原生键空间总和超出候选预算：优先砍"最贵的掩码"，保住便宜但高价值的那些
+        # （例如"词 + 4 位年份"只占几十万键，而"?l?l?l?l?d?d"要几千万键）。
+        # 这样做的好处：候选预算只有百万级时，"词 + 年份"这类形态依然可达，而不是
+        # 被最贵的掩码把预算吃光（实测：预算 100 万时 ?d?d?d?d 曾被裁掉，
+        # 导致 summer2023 这类"词 + 年份"口令整体不可达）。
+        droppable: list[tuple[int, int, StrategyId, str]] = []
+        # 裁剪顺序：先砍纯掩码单元（S6 的"?l?l?l?l"这类随机字母几乎无实战价值），
+        # 再砍"词表 × 掩码"（S7：词根 + 后缀/年份，价值高得多）；同一单元内先砍最贵的。
+        mask_drop_rank = {StrategyId.S6: 0, StrategyId.S7: 1}
+        for strategy_id, _, masks, base in present:
+            for mask in masks:
+                size = mask_keyspace(mask) or 0
+                if size > 0:
+                    droppable.append(
+                        (
+                            mask_drop_rank.get(strategy_id, 2),
+                            -(size * max(1, base)),
+                            strategy_id,
+                            mask,
+                        )
+                    )
+        droppable.sort(key=lambda item: (item[0], item[1]))
+        kept_masks = {sid: list(masks) for sid, _, masks, _ in present}
+        totals = {sid: keyspace for sid, keyspace, _, _ in present}
+        dropped: list[tuple[StrategyId, str]] = []
+        for _, neg_cost, strategy_id, mask in droppable:
+            if sum(totals.values()) <= candidate_limit:
+                break
+            if mask in kept_masks[strategy_id]:
+                kept_masks[strategy_id].remove(mask)
+                totals[strategy_id] = max(0, totals[strategy_id] + neg_cost)
+                dropped.append((strategy_id, mask))
+        if dropped:
+            trimmed_present = []
+            for strategy_id, keyspace, masks, base in present:
+                if masks:
+                    overrides[strategy_id] = tuple(kept_masks[strategy_id])
+                trimmed_present.append(
+                    (strategy_id, totals[strategy_id], masks, base)
+                )
+            present = [unit for unit in trimmed_present if unit[1] > 0]
+            native_total = sum(keyspace for _, keyspace, _, _ in present)
+            for strategy_id, mask in dropped:
+                warnings.append(
+                    f"{strategy_id.value} 掩码 {mask} 因候选预算不足被裁掉"
+                    f"（该掩码键空间 {mask_keyspace(mask) or 0}）"
+                )
+
     if native_total <= candidate_limit:
         native_ids = {strategy_id for strategy_id, _, _, _ in present}
         for strategy_id, keyspace, _, _ in present:
@@ -815,11 +866,12 @@ def _fit_native_units(
             allocations[strategy_id] = max(allocations[strategy_id], keyspace)
             continue
         if not masks:
-            # S1：键空间 = 词表条数 × 规则条数，由执行层用 hashcat -l 截断词表。
+            # S1：键空间 = 词表条数 × 规则链倍数，由执行层按预算切词表。
             allocations[strategy_id] = available
             warnings.append(
-                f"{strategy_id.value} 原生键空间 {keyspace} 超出可用候选预算 "
-                f"{available}，将按预算截断词表"
+                f"{strategy_id.value} 原生键空间 {keyspace:,} 超出可用候选预算 "
+                f"{available:,}，将按预算截断词表；"
+                f"如需完整跑完 S1 请把任务候选预算提高到 ≥ {keyspace:,}"
             )
             continue
         kept, used = select_masks_within(masks, base=base, budget=available)
@@ -829,7 +881,8 @@ def _fit_native_units(
             if len(kept) != len(masks):
                 warnings.append(
                     f"{strategy_id.value} 掩码阶梯按候选预算裁剪为 "
-                    f"{','.join(kept)}（键空间 {used}）"
+                    f"{','.join(kept)}（键空间 {used:,}）；"
+                    f"完整阶梯需要候选预算 ≥ {keyspace:,}"
                 )
         else:
             # 连最小的掩码都装不下：只保留最小的一个作占位，执行层会跳过该单元。
@@ -839,7 +892,7 @@ def _fit_native_units(
             )
             overrides[strategy_id] = (smallest,)
             warnings.append(
-                f"{strategy_id.value} 最小掩码键空间仍超出可用候选预算 {available}，"
+                f"{strategy_id.value} 最小掩码键空间仍超出可用候选预算 {available:,}，"
                 "本次执行将跳过该单元"
             )
     return overrides, rule_overrides, warnings
