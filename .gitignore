@@ -16,3 +16,6 @@ data/**/*.jsonl
 # 评测/调试运行产物（可复现，不入库；词表与语料本身要入库）
 data/benchmark/
 frontend/tsconfig.app.tsbuildinfo
+
+# 自适应切片产生的临时词表切片（运行时产物，可重建）
+data/wordlist-slices/
